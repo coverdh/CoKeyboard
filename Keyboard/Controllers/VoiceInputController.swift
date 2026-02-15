@@ -23,7 +23,10 @@ final class VoiceInputController {
     var onNeedsSession: ((URL?) -> Void)?
 
     private(set) var currentState: KeyboardInputState = .idle {
-        didSet { onStateChanged?(currentState) }
+        didSet { 
+            Logger.stateChange(from: stateDescription(oldValue), to: stateDescription(currentState))
+            onStateChanged?(currentState) 
+        }
     }
 
     private var whisperTokens = 0
@@ -31,57 +34,90 @@ final class VoiceInputController {
     private var pollTimer: Timer?
 
     init() {
-        // Start polling for state changes
+        Logger.keyboardInfo("VoiceInputController initialized")
         startPolling()
     }
     
     deinit {
         pollTimer?.invalidate()
+        Logger.keyboardInfo("VoiceInputController deinitialized")
+    }
+    
+    private func stateDescription(_ state: KeyboardInputState) -> String {
+        switch state {
+        case .idle: return "idle"
+        case .recording: return "recording"
+        case .transcribing: return "transcribing"
+        case .polishing: return "polishing"
+        case .translating: return "translating"
+        case .needsSession: return "needsSession"
+        case .error(let msg): return "error(\(msg))"
+        }
     }
 
     // MARK: - Polling for shared state
     
     private func startPolling() {
+        Logger.keyboardInfo("Starting state polling (interval: 0.5s)")
         pollTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.checkSharedState()
         }
     }
     
     private func checkSharedState() {
+        let isRecording = sessionManager.isRecording
+        let processingStatus = sessionManager.processingStatus
+        
         // Check if main app is recording
-        if sessionManager.isRecording {
+        if isRecording {
             if case .recording = currentState {
                 // Already in recording state
             } else {
+                Logger.recordingInfo("Detected main app is recording")
                 currentState = .recording
             }
             return
         }
         
         // Check processing status
-        switch sessionManager.processingStatus {
+        switch processingStatus {
         case .transcribing:
-            currentState = .transcribing
+            if case .transcribing = currentState { } else {
+                Logger.processingInfo("Main app is transcribing")
+                currentState = .transcribing
+            }
         case .polishing:
-            currentState = .polishing
+            if case .polishing = currentState { } else {
+                Logger.processingInfo("Main app is polishing")
+                currentState = .polishing
+            }
         case .done:
-            // Consume the result
+            Logger.processingInfo("Processing done, consuming result")
             if let result = sessionManager.consumePendingResult() {
                 if !result.isEmpty {
+                    Logger.processingInfo("Got result: \(result.prefix(50))...")
                     onTextReady?(result)
+                } else {
+                    Logger.processingInfo("Result was empty")
                 }
                 sessionManager.processingStatus = .idle
                 currentState = .idle
             }
         case .error:
+            Logger.processingError("Main app reported processing error")
             currentState = .error("Processing failed")
             sessionManager.processingStatus = .idle
             resetAfterDelay()
-        default:
+        case .recording:
+            // Still recording in main app
+            break
+        case .idle:
             // Only reset to idle if we were in a processing state
             if case .transcribing = currentState {
+                Logger.keyboardInfo("Resetting from transcribing to idle")
                 currentState = .idle
             } else if case .polishing = currentState {
+                Logger.keyboardInfo("Resetting from polishing to idle")
                 currentState = .idle
             }
         }
@@ -89,9 +125,13 @@ final class VoiceInputController {
 
     /// 检查并消费待处理的结果
     func checkPendingResult() {
+        Logger.keyboardInfo("Checking for pending result")
         if let result = sessionManager.consumePendingResult(), !result.isEmpty {
+            Logger.processingInfo("Found pending result: \(result.prefix(50))...")
             onTextReady?(result)
             sessionManager.processingStatus = .idle
+        } else {
+            Logger.keyboardInfo("No pending result found")
         }
         
         // Also refresh state
@@ -99,50 +139,64 @@ final class VoiceInputController {
     }
 
     func toggleRecording() {
+        Logger.keyboardInfo("toggleRecording called, current state: \(stateDescription(currentState))")
+        Logger.keyboardInfo("isRecording: \(sessionManager.isRecording), shouldStop: \(sessionManager.shouldStopRecording)")
+        
         switch currentState {
         case .idle, .needsSession, .error:
             // Check if main app is already recording
             if sessionManager.isRecording {
-                // Already recording, this tap means stop
+                Logger.recordingInfo("Main app is recording, requesting stop")
                 requestStopRecording()
             } else {
-                // Need to start recording via main app
+                Logger.recordingInfo("Need to start recording via main app")
                 triggerSessionActivation()
             }
         case .recording:
-            // Stop recording
+            Logger.recordingInfo("Currently recording, requesting stop")
             requestStopRecording()
         default:
+            Logger.keyboardInfo("Ignoring tap - busy processing")
             break
         }
     }
     
     private func requestStopRecording() {
+        Logger.recordingInfo("Requesting stop recording")
         sessionManager.requestStopRecording()
         currentState = .transcribing
     }
 
     private func triggerSessionActivation() {
+        Logger.keyboardInfo("Triggering session activation - will jump to main app")
         currentState = .needsSession
         let url = sessionManager.makeActivationURL(sourceBundleID: nil)
+        Logger.keyboardInfo("Activation URL: \(url?.absoluteString ?? "nil")")
         onNeedsSession?(url)
     }
 
     func translate(text: String) {
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty else { 
+            Logger.keyboardInfo("Translate called with empty text, ignoring")
+            return 
+        }
+        Logger.processingInfo("Starting translation for: \(text.prefix(30))...")
         currentState = .translating
 
         Task { @MainActor in
             let translated = await translationService.translate(text: text)
+            Logger.processingInfo("Translation completed: \(translated.prefix(30))...")
             onTextReady?(translated)
             currentState = .idle
         }
     }
 
     private func resetAfterDelay() {
+        Logger.keyboardInfo("Will reset to idle after 2 seconds")
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(2))
             if case .error = currentState {
+                Logger.keyboardInfo("Resetting from error to idle")
                 currentState = .idle
             }
         }

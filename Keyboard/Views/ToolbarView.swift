@@ -1,60 +1,101 @@
 import UIKit
 
 final class ToolbarView: UIView {
+    var onSettings: (() -> Void)?
     var onTranslate: (() -> Void)?
-    var onAtSign: (() -> Void)?
     var onSpace: (() -> Void)?
     var onDelete: (() -> Void)?
-
-    private let stackView = UIStackView()
-
+    
+    private let leftStack = UIStackView()
+    private let rightStack = UIStackView()
+    
+    // 小按钮尺寸
+    private let buttonSize: CGFloat = 32
+    
     override init(frame: CGRect) {
         super.init(frame: frame)
         setup()
     }
-
+    
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         setup()
     }
-
+    
     private func setup() {
-        stackView.axis = .horizontal
-        stackView.spacing = 8
-        stackView.distribution = .fillEqually
-        stackView.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stackView)
-
+        // 左侧菜单按钮
+        leftStack.axis = .horizontal
+        leftStack.spacing = 8
+        leftStack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(leftStack)
+        
+        // 右侧功能按钮
+        rightStack.axis = .horizontal
+        rightStack.spacing = 8
+        rightStack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(rightStack)
+        
         NSLayoutConstraint.activate([
-            stackView.topAnchor.constraint(equalTo: topAnchor),
-            stackView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stackView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            stackView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            leftStack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            leftStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            
+            rightStack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            rightStack.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
-
-        let buttons: [(String, String, Selector)] = [
-            ("textformat.abc", "Translate", #selector(translateTapped)),
-            ("at", "@", #selector(atTapped)),
-            ("space", "Space", #selector(spaceTapped)),
-            ("delete.left.fill", "Delete", #selector(deleteTapped)),
+        
+        // 左上角菜单图标
+        let settingsBtn = createIconButton(icon: "line.3.horizontal", action: #selector(settingsTapped))
+        leftStack.addArrangedSubview(settingsBtn)
+        
+        // 右侧功能按钮
+        let buttons: [(String, Selector)] = [
+            ("textformat.abc", #selector(translateTapped)),
+            ("space", #selector(spaceTapped)),
+            ("delete.left.fill", #selector(deleteTapped)),
         ]
-
-        for (icon, title, action) in buttons {
-            let btn = UIButton(type: .system)
-            btn.setImage(UIImage(systemName: icon), for: .normal)
-            btn.setTitle(" \(title)", for: .normal)
-            btn.titleLabel?.font = .systemFont(ofSize: 12)
-            btn.tintColor = .label
-            btn.backgroundColor = .systemGray5
-            btn.layer.cornerRadius = 8
-            btn.clipsToBounds = true
-            btn.addTarget(self, action: action, for: .touchUpInside)
-            stackView.addArrangedSubview(btn)
+        
+        for (icon, action) in buttons {
+            let btn = createIconButton(icon: icon, action: action)
+            rightStack.addArrangedSubview(btn)
         }
     }
-
-    @objc private func translateTapped() { onTranslate?() }
-    @objc private func atTapped() { onAtSign?() }
-    @objc private func spaceTapped() { onSpace?() }
-    @objc private func deleteTapped() { onDelete?() }
+    
+    private func createIconButton(icon: String, action: Selector) -> UIButton {
+        let btn = UIButton(type: .system)
+        btn.translatesAutoresizingMaskIntoConstraints = false
+        btn.setImage(UIImage(systemName: icon, withConfiguration: UIImage.SymbolConfiguration(pointSize: 14, weight: .medium)), for: .normal)
+        btn.tintColor = .label
+        // 使用系统默认配色，兼容iOS 26 玻璃效果
+        btn.backgroundColor = .tertiarySystemFill
+        btn.layer.cornerRadius = buttonSize / 2
+        btn.clipsToBounds = true
+        btn.addTarget(self, action: action, for: .touchUpInside)
+        
+        NSLayoutConstraint.activate([
+            btn.widthAnchor.constraint(equalToConstant: buttonSize),
+            btn.heightAnchor.constraint(equalToConstant: buttonSize),
+        ])
+        
+        return btn
+    }
+    
+    @objc private func settingsTapped() {
+        Logger.keyboardInfo("Settings button tapped")
+        onSettings?()
+    }
+    
+    @objc private func translateTapped() {
+        Logger.keyboardInfo("Translate button tapped")
+        onTranslate?()
+    }
+    
+    @objc private func spaceTapped() {
+        Logger.keyboardInfo("Space button tapped")
+        onSpace?()
+    }
+    
+    @objc private func deleteTapped() {
+        Logger.keyboardInfo("Delete button tapped")
+        onDelete?()
+    }
 }
