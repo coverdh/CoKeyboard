@@ -161,9 +161,8 @@ final class VoiceButton: UIView {
         Logger.keyboardInfo("Showing recording state")
         stopAllAnimations()
         
-        // 红色圆形背景，带脉冲动画
-        containerView.backgroundColor = .systemRed
-        containerView.layer.borderWidth = 0
+        // 保持系统填充色，不改变颜色
+        updateIdleAppearance()
         
         iconImageView.isHidden = true
         waveformView.isHidden = false
@@ -171,8 +170,7 @@ final class VoiceButton: UIView {
         thinkingLabel.isHidden = true
         containerView.isUserInteractionEnabled = true
         
-        // 开始缩放动画
-        startBreathingAnimation()
+        // 开始脉冲动画
         startPulseAnimation()
     }
     
@@ -209,10 +207,10 @@ final class VoiceButton: UIView {
     }
     
     private func updateIdleAppearance() {
-        // 使用半透明背景，在毛玻璃效果上更好看
-        containerView.backgroundColor = .secondarySystemBackground
-        containerView.layer.borderWidth = 0.5
-        containerView.layer.borderColor = UIColor.separator.cgColor
+        // 使用轻量级系统填充色，与系统键盘背景融为一体
+        containerView.backgroundColor = .secondarySystemFill
+        containerView.layer.borderWidth = 0
+        containerView.layer.cornerRadius = buttonHeight / 2
     }
     
     // MARK: - Animations
@@ -229,7 +227,7 @@ final class VoiceButton: UIView {
     }
     
     private func startPulseAnimation() {
-        pulseLayer.fillColor = UIColor.systemRed.withAlphaComponent(0.3).cgColor
+        pulseLayer.fillColor = UIColor.systemBlue.withAlphaComponent(0.2).cgColor
         pulseLayer.opacity = 1
         
         let scaleAnim = CABasicAnimation(keyPath: "transform.scale")

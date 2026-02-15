@@ -15,8 +15,8 @@ final class TokenCounterView: UIView {
 
     private func setup() {
         label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        label.textColor = .secondaryLabel
+        label.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        label.textColor = .tertiaryLabel
         label.textAlignment = .right
         addSubview(label)
 

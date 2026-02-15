@@ -30,27 +30,24 @@ class KeyboardViewController: UIInputViewController {
         // 再次检查，确保结果被处理
         voiceInputController.checkPendingResult()
     }
+    
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        Logger.keyboardInfo("KeyboardViewController viewWillDisappear")
+        // 键盘收起时重置到等待录制状态
+        voiceInputController.resetToIdle()
+    }
 
     // MARK: - UI Setup
 
     private func setupUI() {
-        // 使用透明背景，让系统处理键盘背景色
-        // 添加毛玻璃效果背景，与系统键盘一致
+        // 完全透明背景，让系统自动处理键盘外观和模糊效果
+        // iOS 系统会自动为键盘扩展添加适当的背景处理
+        // 不要手动添加模糊层，否则会与系统效果叠加
         view.backgroundColor = .clear
         
-        // 添加模糊背景
-        let blurEffect = UIBlurEffect(style: .systemMaterial)
-        let blurView = UIVisualEffectView(effect: blurEffect)
-        blurView.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(blurView)
-        view.sendSubviewToBack(blurView)
-        
-        NSLayoutConstraint.activate([
-            blurView.topAnchor.constraint(equalTo: view.topAnchor),
-            blurView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            blurView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            blurView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-        ])
+        // 确保inputView也是透明的，与系统toolbar融为一体
+        inputView?.backgroundColor = .clear
 
         voiceButton.translatesAutoresizingMaskIntoConstraints = false
         toolbarView.translatesAutoresizingMaskIntoConstraints = false
@@ -79,8 +76,9 @@ class KeyboardViewController: UIInputViewController {
             tokenCounterView.heightAnchor.constraint(equalToConstant: 16),
         ])
 
-        // Set keyboard height (smaller now with new design)
-        let heightConstraint = view.heightAnchor.constraint(equalToConstant: 180)
+        // Set keyboard height - 使用自适应高度，与系统键盘保持一致
+        // iOS 26 液态玻璃效果需要键盘高度自适应
+        let heightConstraint = view.heightAnchor.constraint(greaterThanOrEqualToConstant: 180)
         heightConstraint.priority = .defaultHigh
         heightConstraint.isActive = true
         

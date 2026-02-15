@@ -35,7 +35,23 @@ final class VoiceInputController {
 
     init() {
         Logger.keyboardInfo("VoiceInputController initialized")
+        // 清理可能的残留状态
+        cleanupStaleState()
+        // 默认状态为等待录制
+        currentState = .idle
         startPolling()
+    }
+    
+    /// 清理残留的共享状态
+    private func cleanupStaleState() {
+        // 如果主 App 没有在录音，但 processingStatus 不是 idle/done，说明是残留状态
+        if !sessionManager.isRecording {
+            let status = sessionManager.processingStatus
+            if status == .transcribing || status == .polishing || status == .recording {
+                Logger.keyboardInfo("Cleaning up stale processingStatus: \(status.rawValue)")
+                sessionManager.processingStatus = .idle
+            }
+        }
     }
     
     deinit {
@@ -200,5 +216,22 @@ final class VoiceInputController {
                 currentState = .idle
             }
         }
+    }
+    
+    /// 键盘收起时调用，重置到等待录制状态
+    func resetToIdle() {
+        Logger.keyboardInfo("Keyboard dismissed, resetting to idle state")
+        
+        // 如果正在录制，停止录制
+        if case .recording = currentState {
+            Logger.recordingInfo("Was recording, stopping recording on keyboard dismiss")
+            sessionManager.requestStopRecording()
+        }
+        
+        // 清理共享状态中的残留处理状态
+        cleanupStaleState()
+        
+        // 重置到等待录制状态
+        currentState = .idle
     }
 }

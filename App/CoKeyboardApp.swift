@@ -18,8 +18,8 @@ struct CoKeyboardApp: App {
             ZStack {
                 MainTabView()
 
-                // Recording overlay (shown when recording in background)
-                if showingRecordingOverlay || recordingService.isRecording {
+                // Recording overlay (仅在录音时显示，后台处理时不显示遮罩)
+                if showingRecordingOverlay && recordingService.isRecording {
                     RecordingOverlayView(
                         sourceBundleID: sourceBundleID,
                         onDismiss: {

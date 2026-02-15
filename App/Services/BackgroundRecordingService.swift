@@ -242,8 +242,13 @@ final class BackgroundRecordingService: ObservableObject {
             try? FileManager.default.removeItem(at: audioURL)
             Logger.processingInfo("Audio file cleaned up")
             
+        } catch let error as WhisperServiceError {
+            Logger.processingError("Whisper processing failed: \(error.localizedDescription)", error: error)
+            await MainActor.run {
+                sessionManager.processingStatus = .error
+            }
         } catch {
-            Logger.processingError("Processing failed", error: error)
+            Logger.processingError("Processing failed with unknown error", error: error)
             await MainActor.run {
                 sessionManager.processingStatus = .error
             }

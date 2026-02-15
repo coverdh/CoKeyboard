@@ -63,12 +63,10 @@ final class ToolbarView: UIView {
     private func createIconButton(icon: String, action: Selector) -> UIButton {
         let btn = UIButton(type: .system)
         btn.translatesAutoresizingMaskIntoConstraints = false
-        btn.setImage(UIImage(systemName: icon, withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .medium)), for: .normal)
-        btn.tintColor = .label
-        // 使用系统默认配色，兼容iOS 26 玻璃效果
-        btn.backgroundColor = .tertiarySystemFill
-        btn.layer.cornerRadius = buttonSize / 2
-        btn.clipsToBounds = true
+        btn.setImage(UIImage(systemName: icon, withConfiguration: UIImage.SymbolConfiguration(pointSize: 14, weight: .medium)), for: .normal)
+        btn.tintColor = .secondaryLabel
+        // 透明背景，仅图标可见，与系统键盘toolbar风格一致
+        btn.backgroundColor = .clear
         btn.addTarget(self, action: action, for: .touchUpInside)
         
         NSLayoutConstraint.activate([

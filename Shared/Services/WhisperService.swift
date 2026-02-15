@@ -18,23 +18,87 @@ final class WhisperService {
     
     /// 获取内置模型路径
     private func bundledModelPath() -> String? {
-        // 模型文件直接位于 App Bundle 根目录
-        // 检查 AudioEncoder.mlmodelc 是否存在来验证模型
         let bundlePath = Bundle.main.bundlePath
-        let audioEncoderPath = (bundlePath as NSString).appendingPathComponent("AudioEncoder.mlmodelc")
         
-        if FileManager.default.fileExists(atPath: audioEncoderPath) {
-            return bundlePath
-        }
-        
-        // 尝试在 Models 子目录中查找
+        // 首先检查标准位置: Models/openai_whisper-tiny
         if let modelsPath = Bundle.main.path(forResource: "Models", ofType: nil) {
             let modelPath = (modelsPath as NSString).appendingPathComponent(modelName)
-            if FileManager.default.fileExists(atPath: modelPath) {
+            let audioEncoderPath = (modelPath as NSString).appendingPathComponent("AudioEncoder.mlmodelc")
+            
+            Logger.keyboardInfo("Checking standard model path: \(modelPath)")
+            if FileManager.default.fileExists(atPath: audioEncoderPath) {
+                Logger.keyboardInfo("Found model at standard location: \(modelPath)")
                 return modelPath
             }
         }
         
+        // 如果标准位置不存在，检查是否文件被扁平化到 Bundle 根目录
+        // 尝试将文件复制到正确的位置
+        let audioEncoderAtRoot = (bundlePath as NSString).appendingPathComponent("AudioEncoder.mlmodelc")
+        let tokenizerAtRoot = (bundlePath as NSString).appendingPathComponent("tokenizer.json")
+        let configAtRoot = (bundlePath as NSString).appendingPathComponent("config.json")
+        
+        if FileManager.default.fileExists(atPath: audioEncoderAtRoot) &&
+           FileManager.default.fileExists(atPath: tokenizerAtRoot) {
+            Logger.keyboardInfo("Found flattened model at bundle root, attempting to reorganize...")
+            
+            // 尝试在 Documents 目录创建正确的模型结构
+            if let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                let modelURL = documentsPath.appendingPathComponent("Models/\(modelName)")
+                let modelPath = modelURL.path
+                
+                // 如果目标目录已经存在且完整，直接使用
+                let audioEncoderPath = (modelPath as NSString).appendingPathComponent("AudioEncoder.mlmodelc")
+                if FileManager.default.fileExists(atPath: audioEncoderPath) {
+                    Logger.keyboardInfo("Using existing reorganized model at: \(modelPath)")
+                    return modelPath
+                }
+                
+                // 创建目录结构
+                try? FileManager.default.createDirectory(at: modelURL, withIntermediateDirectories: true)
+                
+                // 复制所有模型文件
+                let filesToCopy = [
+                    "AudioEncoder.mlmodelc", "MelSpectrogram.mlmodelc", "TextDecoder.mlmodelc",
+                    "tokenizer.json", "config.json", "vocab.json", "merges.txt",
+                    "added_tokens.json", "special_tokens_map.json", "normalizer.json",
+                    "generation_config.json"
+                ]
+                
+                for file in filesToCopy {
+                    let sourcePath = (bundlePath as NSString).appendingPathComponent(file)
+                    let destPath = (modelPath as NSString).appendingPathComponent(file)
+                    
+                    if FileManager.default.fileExists(atPath: sourcePath) {
+                        try? FileManager.default.copyItem(atPath: sourcePath, toPath: destPath)
+                    }
+                }
+                
+                // 验证复制是否成功
+                if FileManager.default.fileExists(atPath: audioEncoderPath) {
+                    Logger.keyboardInfo("Successfully reorganized model at: \(modelPath)")
+                    return modelPath
+                }
+            }
+            
+            // 如果无法重新组织，直接使用 Bundle 根目录
+            Logger.keyboardInfo("Using flattened model at bundle root: \(bundlePath)")
+            return bundlePath
+        }
+        
+        // 检查 App Group 容器
+        if let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AppConstants.appGroupID) {
+            let modelPath = containerURL.appendingPathComponent("Models/\(modelName)").path
+            let audioEncoderPath = (modelPath as NSString).appendingPathComponent("AudioEncoder.mlmodelc")
+            
+            Logger.keyboardInfo("Checking App Group model path: \(modelPath)")
+            if FileManager.default.fileExists(atPath: audioEncoderPath) {
+                Logger.keyboardInfo("Found model in App Group: \(modelPath)")
+                return modelPath
+            }
+        }
+        
+        Logger.keyboardError("Bundled model not found in any location")
         return nil
     }
 
@@ -45,7 +109,78 @@ final class WhisperService {
 
         // 使用内置模型，完全离线运行
         guard let modelPath = bundledModelPath() else {
+            Logger.keyboardError("Model not found in bundle")
             throw WhisperServiceError.modelNotFound
+        }
+        
+        Logger.keyboardInfo("Loading Whisper model from: \(modelPath)")
+        
+        // 检查并列出模型目录中的所有文件
+        if let files = try? FileManager.default.contentsOfDirectory(atPath: modelPath) {
+            Logger.keyboardInfo("Model directory contents: \(files)")
+        }
+        
+        // 设置 Hugging Face 缓存目录为模型目录，这样 WhisperKit 会在这里查找 tokenizer
+        if let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+            let hubCachePath = documentsPath.appendingPathComponent("huggingface/models/openai/whisper-tiny")
+            try? FileManager.default.createDirectory(at: hubCachePath, withIntermediateDirectories: true)
+            
+            // 复制 tokenizer 文件到 Hugging Face 缓存目录
+            let tokenizerFiles = ["tokenizer.json", "config.json", "vocab.json", "merges.txt", 
+                                  "added_tokens.json", "special_tokens_map.json", "normalizer.json",
+                                  "generation_config.json"]
+            for file in tokenizerFiles {
+                let sourcePath = (modelPath as NSString).appendingPathComponent(file)
+                let destPath = hubCachePath.appendingPathComponent(file).path
+                if FileManager.default.fileExists(atPath: sourcePath) {
+                    if !FileManager.default.fileExists(atPath: destPath) {
+                        try? FileManager.default.copyItem(atPath: sourcePath, toPath: destPath)
+                        Logger.keyboardInfo("Copied \(file) to HuggingFace cache")
+                    }
+                } else {
+                    Logger.keyboardInfo("Source file not found: \(sourcePath)")
+                }
+            }
+            
+            // 创建 tokenizer_config.json 如果不存在（WhisperKit 可能需要这个文件）
+            let tokenizerConfigPath = hubCachePath.appendingPathComponent("tokenizer_config.json").path
+            if !FileManager.default.fileExists(atPath: tokenizerConfigPath) {
+                // 创建一个简单的 tokenizer_config.json
+                let tokenizerConfig: [String: Any] = [
+                    "tokenizer_class": "WhisperTokenizer",
+                    "bos_token": "<|endoftext|>",
+                    "eos_token": "<|endoftext|>",
+                    "pad_token": "<|endoftext|>",
+                    "model_max_length": 448
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: tokenizerConfig, options: .prettyPrinted) {
+                    try? data.write(to: URL(fileURLWithPath: tokenizerConfigPath))
+                    Logger.keyboardInfo("Created tokenizer_config.json")
+                }
+            }
+            
+            // 创建 preprocessor_config.json 如果不存在
+            let preprocessorConfigPath = hubCachePath.appendingPathComponent("preprocessor_config.json").path
+            if !FileManager.default.fileExists(atPath: preprocessorConfigPath) {
+                let preprocessorConfig: [String: Any] = [
+                    "feature_extractor_type": "WhisperFeatureExtractor",
+                    "num_mel_bins": 80,
+                    "padding_value": 0.0,
+                    "return_attention_mask": false
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: preprocessorConfig, options: .prettyPrinted) {
+                    try? data.write(to: URL(fileURLWithPath: preprocessorConfigPath))
+                    Logger.keyboardInfo("Created preprocessor_config.json")
+                }
+            }
+            
+            // 设置环境变量指定 Hugging Face 缓存位置
+            setenv("HF_HOME", documentsPath.appendingPathComponent("huggingface").path, 1)
+            
+            // 列出缓存目录内容以确认文件已复制
+            if let cacheFiles = try? FileManager.default.contentsOfDirectory(atPath: hubCachePath.path) {
+                Logger.keyboardInfo("HuggingFace cache contents: \(cacheFiles)")
+            }
         }
         
         let config = WhisperKitConfig(
@@ -56,34 +191,88 @@ final class WhisperService {
                 textDecoderCompute: .cpuAndGPU,
                 prefillCompute: .cpuAndGPU
             ),
-            verbose: false,
-            logLevel: .none,
+            verbose: true,
+            logLevel: .debug,
             prewarm: true,
             load: true,
-            download: false  // 禁用下载，使用内置模型
+            download: false,  // 禁用下载，使用内置模型
+            useBackgroundDownloadSession: false  // 禁用后台下载
         )
-        whisperKit = try await WhisperKit(config)
+        
+        do {
+            // 创建 WhisperKit 实例
+            let kit = try await WhisperKit(config)
+            
+            // 确保模型完全加载
+            if kit.modelState == .loaded {
+                whisperKit = kit
+                Logger.keyboardInfo("Whisper model loaded successfully")
+            } else {
+                Logger.keyboardError("Model state is not loaded: \(kit.modelState)")
+                throw WhisperServiceError.modelNotFound
+            }
+        } catch {
+            Logger.keyboardError("Failed to load Whisper model: \(error.localizedDescription)", error: error)
+            throw WhisperServiceError.modelNotFound
+        }
     }
 
-    func transcribe(audioURL: URL) async throws -> TranscriptionResult {
+    func transcribe(audioURL: URL, language: String? = nil) async throws -> TranscriptionResult {
         if whisperKit == nil {
+            Logger.keyboardInfo("WhisperKit not loaded, preparing...")
             try await prepare()
         }
 
         guard let kit = whisperKit else {
+            Logger.keyboardError("WhisperKit is nil after prepare")
             throw WhisperServiceError.notReady
         }
+        
+        Logger.keyboardInfo("Starting transcription for: \(audioURL.path)")
 
-        let results = try await kit.transcribe(audioPath: audioURL.path())
-
-        let text = results.map { $0.text }.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-        let tokenCount = text.count / 4  // rough estimate
-
-        return TranscriptionResult(text: text, tokenCount: tokenCount)
+        do {
+            // 语言设置优先级：传入参数 > 系统语言 > 自动检测
+            let targetLanguage: String? = language ?? getSystemLanguageCode()
+            Logger.keyboardInfo("Using language: \(targetLanguage ?? "auto-detect")")
+            
+            // 配置转录选项，支持多语言识别
+            // 将 language 设为 nil 可让 Whisper 自动检测语言（支持中英文混合）
+            let options = DecodingOptions(
+                task: .transcribe,       // 转录任务（非翻译）
+                language: targetLanguage, // nil 表示自动检测语言
+                temperature: 0.0,        // 贪婪解码，最准确
+                sampleLength: 224,       // 最大采样长度
+                usePrefillPrompt: true,
+                usePrefillCache: true
+            )
+            
+            let results = try await kit.transcribe(audioPath: audioURL.path(), decodeOptions: options)
+            
+            let text = results.map { $0.text }.joined(separator: " ").trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            let tokenCount = text.count / 4  // rough estimate
+            
+            Logger.keyboardInfo("Transcription successful: \(text.prefix(50))...")
+            
+            return TranscriptionResult(text: text, tokenCount: tokenCount)
+        } catch {
+            Logger.keyboardError("Transcription failed: \(error.localizedDescription)", error: error)
+            throw WhisperServiceError.transcriptionFailed
+        }
     }
 
     func unload() {
         whisperKit = nil
+    }
+    
+    /// 获取系统语言代码
+    /// 返回 nil 表示使用 Whisper 自动检测语言（支持中英文混合识别）
+    /// 如需强制指定语言，可在 AppSettings 中添加语言设置选项
+    private func getSystemLanguageCode() -> String? {
+        // 返回 nil 让 Whisper 自动检测语言
+        // Whisper 的 tiny 模型支持 99 种语言的自动检测
+        // 这样可以实现中英文混合输入的自动识别
+        Logger.keyboardInfo("Using auto language detection for multilingual support")
+        return nil
     }
 }
 
