@@ -28,6 +28,8 @@ targets:
           - "**/.DS_Store"
     resources:
       - path: App/Resources/Assets.xcassets
+      - path: App/Resources/Models
+        buildPhase: resources
     settings:
       base:
         INFOPLIST_FILE: App/Info.plist
@@ -43,6 +45,9 @@ targets:
         embed: true
     entitlements:
       path: App/Entitlements/CoKeyboard.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.cover.CoKeyboard
 
   CoKeyboardExtension:
     type: app-extension
@@ -68,3 +73,6 @@ targets:
       - package: WhisperKit
     entitlements:
       path: Keyboard/Entitlements/KeyboardExtension.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.cover.CoKeyboard

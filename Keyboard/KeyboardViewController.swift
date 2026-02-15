@@ -131,14 +131,13 @@ class KeyboardViewController: UIInputViewController {
         }
 
         // Toolbar actions
-        toolbarView.onSettings = { [weak self] in
-            Logger.keyboardInfo("Settings tapped - opening main app settings")
-            if let url = URL(string: "\(PermissionURLScheme.scheme)://settings") {
-                self?.openURL(url)
-            }
+        toolbarView.onDismissKeyboard = { [weak self] in
+            Logger.keyboardInfo("Dismiss keyboard tapped")
+            self?.handleDismissKeyboard()
         }
-        toolbarView.onTranslate = { [weak self] in
-            self?.handleTranslate()
+        toolbarView.onAtSymbol = { [weak self] in
+            Logger.keyboardInfo("@ symbol tapped")
+            self?.textDocumentProxy.insertText("@")
         }
         toolbarView.onSpace = { [weak self] in
             self?.textDocumentProxy.insertText(" ")
@@ -172,30 +171,19 @@ class KeyboardViewController: UIInputViewController {
         Logger.keyboardError("Could not find responder to open URL")
     }
 
-    // MARK: - Translate
-
-    private func handleTranslate() {
-        Logger.keyboardInfo("handleTranslate called")
-        // Read current text from the text field
-        let beforeText = textDocumentProxy.documentContextBeforeInput ?? ""
-        let afterText = textDocumentProxy.documentContextAfterInput ?? ""
-        let fullText = beforeText + afterText
-
-        guard !fullText.isEmpty else { 
-            Logger.keyboardInfo("No text to translate")
-            return 
+    // MARK: - Dismiss Keyboard
+    
+    private func handleDismissKeyboard() {
+        Logger.keyboardInfo("Dismissing keyboard")
+        // 尝试通过responder链收起键盘
+        var responder: UIResponder? = self
+        while let r = responder {
+            let selector = NSSelectorFromString("resignFirstResponder")
+            if r.responds(to: selector) {
+                r.perform(selector)
+                return
+            }
+            responder = r.next
         }
-        
-        Logger.keyboardInfo("Translating text: \(fullText.prefix(30))...")
-
-        // Delete existing text
-        for _ in 0..<afterText.count {
-            textDocumentProxy.adjustTextPosition(byCharacterOffset: 1)
-        }
-        for _ in 0..<(beforeText.count + afterText.count) {
-            textDocumentProxy.deleteBackward()
-        }
-
-        voiceInputController.translate(text: fullText)
     }
 }

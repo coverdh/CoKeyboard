@@ -1,8 +1,8 @@
 import UIKit
 
 final class ToolbarView: UIView {
-    var onSettings: (() -> Void)?
-    var onTranslate: (() -> Void)?
+    var onDismissKeyboard: (() -> Void)?
+    var onAtSymbol: (() -> Void)?
     var onSpace: (() -> Void)?
     var onDelete: (() -> Void)?
     
@@ -23,7 +23,7 @@ final class ToolbarView: UIView {
     }
     
     private func setup() {
-        // 左侧菜单按钮
+        // 左侧收起键盘按钮
         leftStack.axis = .horizontal
         leftStack.spacing = 8
         leftStack.translatesAutoresizingMaskIntoConstraints = false
@@ -43,13 +43,13 @@ final class ToolbarView: UIView {
             rightStack.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
         
-        // 左上角菜单图标
-        let settingsBtn = createIconButton(icon: "line.3.horizontal", action: #selector(settingsTapped))
-        leftStack.addArrangedSubview(settingsBtn)
+        // 左侧：收起键盘按钮
+        let dismissBtn = createIconButton(icon: "keyboard.chevron.compact.down", action: #selector(dismissKeyboardTapped))
+        leftStack.addArrangedSubview(dismissBtn)
         
-        // 右侧功能按钮
+        // 右侧功能按钮：@、空格、删除
         let buttons: [(String, Selector)] = [
-            ("textformat.abc", #selector(translateTapped)),
+            ("at", #selector(atSymbolTapped)),
             ("space", #selector(spaceTapped)),
             ("delete.left.fill", #selector(deleteTapped)),
         ]
@@ -63,7 +63,7 @@ final class ToolbarView: UIView {
     private func createIconButton(icon: String, action: Selector) -> UIButton {
         let btn = UIButton(type: .system)
         btn.translatesAutoresizingMaskIntoConstraints = false
-        btn.setImage(UIImage(systemName: icon, withConfiguration: UIImage.SymbolConfiguration(pointSize: 14, weight: .medium)), for: .normal)
+        btn.setImage(UIImage(systemName: icon, withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .medium)), for: .normal)
         btn.tintColor = .label
         // 使用系统默认配色，兼容iOS 26 玻璃效果
         btn.backgroundColor = .tertiarySystemFill
@@ -79,14 +79,14 @@ final class ToolbarView: UIView {
         return btn
     }
     
-    @objc private func settingsTapped() {
-        Logger.keyboardInfo("Settings button tapped")
-        onSettings?()
+    @objc private func dismissKeyboardTapped() {
+        Logger.keyboardInfo("Dismiss keyboard button tapped")
+        onDismissKeyboard?()
     }
     
-    @objc private func translateTapped() {
-        Logger.keyboardInfo("Translate button tapped")
-        onTranslate?()
+    @objc private func atSymbolTapped() {
+        Logger.keyboardInfo("@ symbol button tapped")
+        onAtSymbol?()
     }
     
     @objc private func spaceTapped() {

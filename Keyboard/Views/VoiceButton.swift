@@ -2,8 +2,8 @@ import UIKit
 
 final class VoiceButton: UIView {
     private let containerView = UIView()
-    private let iconImageView = UIImageView()
-    private let waveformView = WaveformView()
+    private let iconImageView = UIImageView()           // 等待录制时的麦克风图标
+    private let waveformView = WaveformView()           // 录制中的动态声波
     private let thinkingLabel = UILabel()
     private let pulseLayer = CAShapeLayer()
     
@@ -40,16 +40,17 @@ final class VoiceButton: UIView {
         // 默认样式：白色底/黑色图标
         updateIdleAppearance()
         
-        // 麦克风图标
+        // 等待录制时的麦克风图标
         iconImageView.translatesAutoresizingMaskIntoConstraints = false
         iconImageView.contentMode = .scaleAspectFit
         iconImageView.tintColor = .label
         iconImageView.image = UIImage(systemName: "mic.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 28, weight: .medium))
         containerView.addSubview(iconImageView)
         
-        // 声波视图 (录音时显示)
+        // 声波视图 (录音时显示动态波形)
         waveformView.translatesAutoresizingMaskIntoConstraints = false
         waveformView.isHidden = true
+        waveformView.setBarColor(.white)
         containerView.addSubview(waveformView)
         
         // Thinking 标签 (处理时显示)
@@ -198,6 +199,7 @@ final class VoiceButton: UIView {
         stopAllAnimations()
         updateIdleAppearance()
         
+        // 错误时显示警告图标
         iconImageView.isHidden = false
         iconImageView.image = UIImage(systemName: "exclamationmark.triangle.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 28, weight: .medium))
         iconImageView.tintColor = .systemOrange
@@ -343,6 +345,12 @@ final class WaveformView: UIView {
     func stopAnimating() {
         for bar in barLayers {
             bar.removeAllAnimations()
+        }
+    }
+    
+    func setBarColor(_ color: UIColor) {
+        for bar in barLayers {
+            bar.fillColor = color.cgColor
         }
     }
 }
