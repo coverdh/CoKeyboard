@@ -28,9 +28,14 @@ final class AppSettings {
         didSet { defaults.set(targetLanguage, forKey: "targetLanguage") }
     }
     
-    // 语音识别语言设置: "auto" | "zh" | "en" | "ja" | "ko" | ...
+    // 语音识别主语言设置: "auto" | "zh" | "en" | "ja" | "ko" | ...
     var speechRecognitionLanguage: String {
         didSet { defaults.set(speechRecognitionLanguage, forKey: "speechRecognitionLanguage") }
+    }
+    
+    // 语音识别辅助语言: nil | "en" | "zh" | ... (当主语言识别失败时尝试)
+    var speechSecondaryLanguage: String? {
+        didSet { defaults.set(speechSecondaryLanguage, forKey: "speechSecondaryLanguage") }
     }
     
     var voiceBackgroundDuration: Int {
@@ -71,7 +76,8 @@ final class AppSettings {
         self.llmBaseURL = defaults.string(forKey: "llmBaseURL") ?? Self.providerDefaults["openai"]!.baseURL
         self.llmModel = defaults.string(forKey: "llmModel") ?? Self.providerDefaults["openai"]!.model
         self.targetLanguage = defaults.string(forKey: "targetLanguage") ?? AppConstants.defaultTargetLanguage
-        self.speechRecognitionLanguage = defaults.string(forKey: "speechRecognitionLanguage") ?? "auto"
+        self.speechRecognitionLanguage = defaults.string(forKey: "speechRecognitionLanguage") ?? "zh"
+        self.speechSecondaryLanguage = defaults.string(forKey: "speechSecondaryLanguage") ?? "en"
         let bgDur = defaults.integer(forKey: "voiceBackgroundDuration")
         self.voiceBackgroundDuration = bgDur > 0 ? bgDur : AppConstants.defaultVoiceBackgroundDuration
     }
@@ -82,7 +88,8 @@ final class AppSettings {
         llmBaseURL = defaults.string(forKey: "llmBaseURL") ?? Self.providerDefaults["openai"]!.baseURL
         llmModel = defaults.string(forKey: "llmModel") ?? Self.providerDefaults["openai"]!.model
         targetLanguage = defaults.string(forKey: "targetLanguage") ?? AppConstants.defaultTargetLanguage
-        speechRecognitionLanguage = defaults.string(forKey: "speechRecognitionLanguage") ?? "auto"
+        speechRecognitionLanguage = defaults.string(forKey: "speechRecognitionLanguage") ?? "zh"
+        speechSecondaryLanguage = defaults.string(forKey: "speechSecondaryLanguage") ?? "en"
         let bgDur = defaults.integer(forKey: "voiceBackgroundDuration")
         voiceBackgroundDuration = bgDur > 0 ? bgDur : AppConstants.defaultVoiceBackgroundDuration
     }

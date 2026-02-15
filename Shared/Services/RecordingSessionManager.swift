@@ -15,6 +15,8 @@ final class RecordingSessionManager {
     private let sourceAppBundleIDKey = "sourceAppBundleID"
     private let pendingResultKey = "pendingVoiceResult"
     private let processingStatusKey = "processingStatus" // idle, transcribing, polishing, done, error
+    private let audioLevelKey = "currentAudioLevel"      // 实时音频电平 0.0-1.0
+    private let processingProgressKey = "processingProgress" // 处理进度 0.0-1.0
 
     private init() {
         defaults = UserDefaults(suiteName: AppConstants.appGroupID)
@@ -103,6 +105,30 @@ final class RecordingSessionManager {
             defaults?.synchronize()
         }
     }
+    
+    // MARK: - Audio Level (实时音频电平)
+    
+    /// 当前音频电平 (0.0-1.0)
+    var currentAudioLevel: Float {
+        get { defaults?.float(forKey: audioLevelKey) ?? 0.0 }
+        set {
+            defaults?.set(newValue, forKey: audioLevelKey)
+            // 不调用 synchronize，频繁更新时依赖自动同步
+        }
+    }
+    
+    // MARK: - Processing Progress (处理进度)
+    
+    /// 处理进度 (0.0-1.0)
+    /// 0.0-0.9: 本地转写进度
+    /// 0.9-1.0: 远程润色进度
+    var processingProgress: Float {
+        get { defaults?.float(forKey: processingProgressKey) ?? 0.0 }
+        set {
+            defaults?.set(newValue, forKey: processingProgressKey)
+            defaults?.synchronize()
+        }
+    }
 
     // MARK: - Source App
 
@@ -168,6 +194,8 @@ final class RecordingSessionManager {
         audioFilePath = nil
         processingStatus = .idle
         pendingResult = nil
+        currentAudioLevel = 0.0
+        processingProgress = 0.0
     }
 
     // MARK: - URL Scheme

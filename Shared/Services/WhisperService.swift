@@ -233,49 +233,72 @@ final class WhisperService {
         Logger.keyboardInfo("Starting transcription for: \(audioURL.path)")
 
         do {
-            // 确定语言设置：传入参数 > App设置 > 自动检测
             let settings = AppSettings.shared
-            let targetLang: String? = language ?? (settings.speechRecognitionLanguage == "auto" ? nil : settings.speechRecognitionLanguage)
             
-            // 配置转录选项，支持多语言识别
-            // 注意：WhisperKit 的 language: nil 无法正确触发自动检测 (issue #226)
-            // 正确做法是完全不传 language 参数
-            let options: DecodingOptions
-            if let lang = targetLang {
-                // 指定语言模式
-                Logger.keyboardInfo("Using specified language: \(lang)")
-                options = DecodingOptions(
-                    task: .transcribe,
-                    language: lang,
-                    temperature: 0.0,
-                    sampleLength: 224,
-                    usePrefillPrompt: true,
-                    usePrefillCache: true
-                )
-            } else {
-                // 自动检测模式 - 不传 language 参数以启用真正的自动检测
-                Logger.keyboardInfo("Using automatic language detection (no language specified)")
-                options = DecodingOptions(
-                    task: .transcribe,
-                    temperature: 0.0,
-                    sampleLength: 224,
-                    usePrefillPrompt: false,  // 自动检测时禁用 prefill，避免语言偏向
-                    usePrefillCache: false
-                )
+            // 确定主语言：传入参数 > App设置
+            let primaryLang: String? = language ?? (settings.speechRecognitionLanguage == "auto" ? nil : settings.speechRecognitionLanguage)
+            
+            // 使用主语言进行转录
+            let primaryResult = try await performTranscription(kit: kit, audioURL: audioURL, language: primaryLang)
+            
+            // 检查是否包含 "foreign language" 提示，并且有辅助语言可用
+            if primaryResult.text.contains("[Speaking in foreign language]") ||
+               primaryResult.text.contains("[说外语]") {
+                
+                // 获取辅助语言（必须与主语言不同）
+                if let secondaryLang = settings.speechSecondaryLanguage,
+                   secondaryLang != primaryLang {
+                    Logger.keyboardInfo("Primary language detected foreign speech, trying secondary language: \(secondaryLang)")
+                    
+                    let secondaryResult = try await performTranscription(kit: kit, audioURL: audioURL, language: secondaryLang)
+                    
+                    // 如果辅助语言识别结果更好（不包含 foreign language 提示），使用辅助语言结果
+                    if !secondaryResult.text.contains("[Speaking in foreign language]") &&
+                       !secondaryResult.text.contains("[说外语]") &&
+                       !secondaryResult.text.isEmpty {
+                        Logger.keyboardInfo("Using secondary language result: \(secondaryResult.text.prefix(50))...")
+                        return secondaryResult
+                    }
+                }
             }
             
-            let results = try await kit.transcribe(audioPath: audioURL.path(), decodeOptions: options)
-            
-            let text = results.map { $0.text }.joined(separator: " ").trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-            let tokenCount = text.count / 4  // rough estimate
-            
-            Logger.keyboardInfo("Transcription successful: \(text.prefix(50))...")
-            
-            return TranscriptionResult(text: text, tokenCount: tokenCount)
+            return primaryResult
         } catch {
             Logger.keyboardError("Transcription failed: \(error.localizedDescription)", error: error)
             throw WhisperServiceError.transcriptionFailed
         }
+    }
+    
+    /// 执行单次转录
+    private func performTranscription(kit: WhisperKit, audioURL: URL, language: String?) async throws -> TranscriptionResult {
+        let options: DecodingOptions
+        if let lang = language {
+            Logger.keyboardInfo("Transcribing with language: \(lang)")
+            options = DecodingOptions(
+                task: .transcribe,
+                language: lang,
+                temperature: 0.0,
+                sampleLength: 224,
+                usePrefillPrompt: true,
+                usePrefillCache: true
+            )
+        } else {
+            Logger.keyboardInfo("Transcribing with automatic language detection")
+            options = DecodingOptions(
+                task: .transcribe,
+                temperature: 0.0,
+                sampleLength: 224,
+                usePrefillPrompt: false,
+                usePrefillCache: false
+            )
+        }
+        
+        let results = try await kit.transcribe(audioPath: audioURL.path(), decodeOptions: options)
+        let text = results.map { $0.text }.joined(separator: " ").trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+        let tokenCount = text.count / 4  // rough estimate
+        
+        Logger.keyboardInfo("Transcription result: \(text.prefix(50))...")
+        return TranscriptionResult(text: text, tokenCount: tokenCount)
     }
 
     func unload() {

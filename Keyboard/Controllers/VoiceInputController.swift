@@ -21,6 +21,8 @@ final class VoiceInputController {
     var onTextReady: ((String) -> Void)?
     var onTokensUpdated: ((Int, Int) -> Void)?
     var onNeedsSession: ((URL?) -> Void)?
+    var onAudioLevelUpdated: ((Float) -> Void)?     // 音频电平更新
+    var onProgressUpdated: ((Float) -> Void)?       // 处理进度更新
 
     private(set) var currentState: KeyboardInputState = .idle {
         didSet { 
@@ -83,6 +85,18 @@ final class VoiceInputController {
     private func checkSharedState() {
         let isRecording = sessionManager.isRecording
         let processingStatus = sessionManager.processingStatus
+        
+        // 轮询音频电平 (录音时)
+        if isRecording {
+            let audioLevel = sessionManager.currentAudioLevel
+            onAudioLevelUpdated?(audioLevel)
+        }
+        
+        // 轮询处理进度 (处理时)
+        if processingStatus == .transcribing || processingStatus == .polishing {
+            let progress = sessionManager.processingProgress
+            onProgressUpdated?(progress)
+        }
         
         // Check if main app is recording
         if isRecording {

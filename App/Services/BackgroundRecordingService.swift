@@ -76,9 +76,14 @@ final class BackgroundRecordingService: ObservableObject {
         }
         
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-            try? self?.audioFile?.write(from: buffer)
+            guard let self = self else { return }
+            try? self.audioFile?.write(from: buffer)
+            
+            // 计算音频电平并写入共享状态
+            let level = self.calculateAudioLevel(from: buffer)
+            self.sessionManager.currentAudioLevel = level
         }
-        Logger.recordingInfo("Audio tap installed")
+        Logger.recordingInfo("Audio tap installed with level metering")
         
         engine.prepare()
         do {
@@ -132,9 +137,34 @@ final class BackgroundRecordingService: ObservableObject {
         recordingDuration = 0
         Logger.recordingInfo("Recording stopped, duration was: \(String(format: "%.1f", finalDuration))s")
         
+        // 清零音频电平
+        sessionManager.currentAudioLevel = 0.0
+        
         // Update shared state
         sessionManager.stopRecording()
         Logger.recordingInfo("Shared state updated, isRecording = false")
+    }
+    
+    // MARK: - Audio Level Calculation
+    
+    /// 计算音频缓冲区的电平 (RMS)
+    private func calculateAudioLevel(from buffer: AVAudioPCMBuffer) -> Float {
+        guard let channelData = buffer.floatChannelData?[0] else { return 0 }
+        let frameCount = Int(buffer.frameLength)
+        guard frameCount > 0 else { return 0 }
+        
+        // 计算 RMS (均方根)
+        var sum: Float = 0
+        for i in 0..<frameCount {
+            let sample = channelData[i]
+            sum += sample * sample
+        }
+        let rms = sqrt(sum / Float(frameCount))
+        
+        // 将 RMS 转换为 0-1 范围，并应用对数缩放使其更线性
+        // 典型的语音 RMS 在 0.01-0.3 范围
+        let normalizedLevel = min(1.0, max(0.0, rms * 3.0))
+        return normalizedLevel
     }
     
     // MARK: - Background Polling
@@ -193,10 +223,27 @@ final class BackgroundRecordingService: ObservableObject {
         Logger.processingInfo("Starting transcription...")
         await MainActor.run {
             sessionManager.processingStatus = .transcribing
+            sessionManager.processingProgress = 0.0
         }
         
         do {
+            // 模拟转写进度 (Whisper 不提供真实进度，我们用时间估算)
+            let progressTask = Task {
+                for i in 1...9 {
+                    try? await Task.sleep(for: .milliseconds(300))
+                    await MainActor.run {
+                        sessionManager.processingProgress = Float(i) * 0.1  // 0.1 -> 0.9
+                    }
+                }
+            }
+            
             let transcription = try await WhisperService.shared.transcribe(audioURL: audioURL)
+            progressTask.cancel()
+            
+            await MainActor.run {
+                sessionManager.processingProgress = 0.9  // 转写完成，进度 90%
+            }
+            
             Logger.processingInfo("Transcription completed: \"\(transcription.text.prefix(50))...\" (\(transcription.tokenCount) tokens)")
             
             guard !transcription.text.isEmpty else {
@@ -204,6 +251,7 @@ final class BackgroundRecordingService: ObservableObject {
                 await MainActor.run {
                     sessionManager.pendingResult = ""
                     sessionManager.processingStatus = .done
+                    sessionManager.processingProgress = 1.0
                 }
                 return
             }
@@ -225,6 +273,7 @@ final class BackgroundRecordingService: ObservableObject {
             await MainActor.run {
                 sessionManager.pendingResult = result.text
                 sessionManager.processingStatus = .done
+                sessionManager.processingProgress = 1.0
                 Logger.processingInfo("Result saved to pendingResult")
                 
                 // Record to history

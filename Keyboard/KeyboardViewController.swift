@@ -116,6 +116,20 @@ class KeyboardViewController: UIInputViewController {
                 self?.tokenCounterView.update(whisperTokens: whisper, polishTokens: polish)
             }
         }
+        
+        // 音频电平更新
+        voiceInputController.onAudioLevelUpdated = { [weak self] level in
+            DispatchQueue.main.async {
+                self?.voiceButton.updateAudioLevel(level)
+            }
+        }
+        
+        // 处理进度更新
+        voiceInputController.onProgressUpdated = { [weak self] progress in
+            DispatchQueue.main.async {
+                self?.voiceButton.updateProgress(progress)
+            }
+        }
 
         // 需要激活会话 - 打开主App
         voiceInputController.onNeedsSession = { [weak self] url in
