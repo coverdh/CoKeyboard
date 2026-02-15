@@ -2,7 +2,7 @@ import Foundation
 import AVFoundation
 import SwiftData
 
-/// 后台录音服务 - 在主App中运行，监听键盘的停止信号
+/// 后台录音服务 - 在主 App 中运行，监听键盘的停止信号
 @MainActor
 final class BackgroundRecordingService: ObservableObject {
     static let shared = BackgroundRecordingService()
@@ -13,10 +13,15 @@ final class BackgroundRecordingService: ObservableObject {
     private var idleTimer: Timer?           // 空闲计时器，用于自动停止系统录音
     private let sessionManager = RecordingSessionManager.shared
     
-    @Published var isRecording = false
+    // 新增：控制是否写入文件的标志
+    private var isWritingToFile = false
+    
+    @Published var isRecording = false      // AVAudioEngine 是否运行
+    @Published var isCapturing = false      // 是否正在采集（写入文件）
     @Published var recordingDuration: TimeInterval = 0
     
     private var durationTimer: Timer?
+    private var captureStartTime: Date?     // 采集开始时间
     
     private init() {
         Logger.recordingInfo("BackgroundRecordingService initialized")
@@ -94,7 +99,9 @@ final class BackgroundRecordingService: ObservableObject {
     func startRecording() throws {
         Logger.recordingInfo("startRecording() called")
         guard !isRecording else { 
-            Logger.recordingInfo("Already recording, ignoring")
+            // 如果已经在录音，只需要开始采集
+            Logger.recordingInfo("Already recording, just start capturing")
+            startCapturing()
             return 
         }
         
@@ -103,7 +110,6 @@ final class BackgroundRecordingService: ObservableObject {
         let session = AVAudioSession.sharedInstance()
         do {
             // 使用 .playAndRecord 并添加 .mixWithOthers 支持后台录音
-            // .duckOthers 让其他音频降低音量而不是完全停止
             try session.setCategory(
                 .playAndRecord,
                 mode: .default,
@@ -116,19 +122,6 @@ final class BackgroundRecordingService: ObservableObject {
             throw error
         }
         
-        // Get shared audio file URL
-        guard let audioURL = sessionManager.sharedAudioURL else {
-            Logger.recordingError("No shared container URL available")
-            throw RecordingError.noSharedContainer
-        }
-        Logger.recordingInfo("Audio will be saved to: \(audioURL.path)")
-        
-        // Remove old file if exists
-        if FileManager.default.fileExists(atPath: audioURL.path) {
-            try? FileManager.default.removeItem(at: audioURL)
-            Logger.recordingInfo("Removed existing audio file")
-        }
-        
         // Setup audio engine
         Logger.recordingInfo("Setting up AVAudioEngine...")
         let engine = AVAudioEngine()
@@ -136,29 +129,23 @@ final class BackgroundRecordingService: ObservableObject {
         let format = inputNode.outputFormat(forBus: 0)
         Logger.recordingInfo("Input format: \(format.sampleRate)Hz, \(format.channelCount) channels")
         
-        do {
-            audioFile = try AVAudioFile(forWriting: audioURL, settings: [
-                AVFormatIDKey: kAudioFormatLinearPCM,
-                AVSampleRateKey: format.sampleRate,
-                AVNumberOfChannelsKey: 1,
-                AVLinearPCMBitDepthKey: 16,
-                AVLinearPCMIsFloatKey: false,
-            ])
-            Logger.recordingInfo("Audio file created successfully")
-        } catch {
-            Logger.recordingError("Failed to create audio file", error: error)
-            throw error
-        }
-        
+        // 安装 audio tap，但只有在 isWritingToFile=true 时才写入文件
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             guard let self = self else { return }
-            try? self.audioFile?.write(from: buffer)
             
-            // 计算音频电平并写入共享状态
-            let level = self.calculateAudioLevel(from: buffer)
-            self.sessionManager.currentAudioLevel = level
+            // 只有在采集模式时才写入文件
+            if self.isWritingToFile, let file = self.audioFile {
+                do {
+                    try file.write(from: buffer)
+                } catch {
+                    Logger.recordingError("Failed to write audio buffer: \(error.localizedDescription)")
+                }
+                // 计算音频电平
+                let level = self.calculateAudioLevel(from: buffer)
+                self.sessionManager.currentAudioLevel = level
+            }
         }
-        Logger.recordingInfo("Audio tap installed with level metering")
+        Logger.recordingInfo("Audio tap installed")
         
         engine.prepare()
         do {
@@ -172,21 +159,71 @@ final class BackgroundRecordingService: ObservableObject {
         self.audioEngine = engine
         self.isRecording = true
         
-        // Update shared state
-        sessionManager.startRecording()
-        sessionManager.audioFilePath = audioURL.path
-        Logger.recordingInfo("Shared state updated, isRecording = true")
-        
-        // Start polling for stop signal
+        // Start polling for signals
         startPollingForStopSignal()
         
-        // Start duration timer
-        startDurationTimer()
+        // 立即开始采集
+        startCapturing()
         
         Logger.recordingInfo("Recording started successfully!")
     }
     
-    /// 停止音频采集，但保持系统录音（进入待机状态）
+    /// 开始采集（写入文件）
+    private func startCapturing() {
+        guard isRecording else {
+            Logger.recordingInfo("Cannot start capturing - not recording")
+            return
+        }
+        
+        guard let engine = audioEngine else {
+            Logger.recordingError("AudioEngine is nil")
+            return
+        }
+        
+        // 取消空闲计时器
+        idleTimer?.invalidate()
+        idleTimer = nil
+        
+        // 获取共享音频文件 URL
+        guard let audioURL = sessionManager.sharedAudioURL else {
+            Logger.recordingError("No shared container URL available")
+            return
+        }
+        
+        // 移除旧文件
+        if FileManager.default.fileExists(atPath: audioURL.path) {
+            try? FileManager.default.removeItem(at: audioURL)
+        }
+        
+        // 使用与 audio tap 相同的格式创建文件（关键！）
+        let inputFormat = engine.inputNode.outputFormat(forBus: 0)
+        Logger.recordingInfo("Creating audio file with format: \(inputFormat.sampleRate)Hz, \(inputFormat.channelCount)ch, \(inputFormat.commonFormat.rawValue)")
+        
+        do {
+            // 使用 inputNode 的输出格式创建文件，确保格式匹配
+            audioFile = try AVAudioFile(forWriting: audioURL, settings: inputFormat.settings)
+            Logger.recordingInfo("Audio file created successfully")
+        } catch {
+            Logger.recordingError("Failed to create audio file: \(error.localizedDescription)", error: error)
+            return
+        }
+        
+        // 开始写入文件
+        isWritingToFile = true
+        isCapturing = true
+        captureStartTime = Date()
+        
+        // 更新共享状态
+        sessionManager.startRecording()
+        sessionManager.audioFilePath = audioURL.path
+        
+        // 启动时长计时器
+        startDurationTimer()
+        
+        Logger.recordingInfo("Capturing started")
+    }
+    
+    /// 停止音频采集，保持 AVAudioEngine 运行（进入待机状态）
     func stopCapturing() {
         Logger.recordingInfo("stopCapturing() called - entering idle state")
         stopCapturingInternal()
@@ -201,39 +238,37 @@ final class BackgroundRecordingService: ObservableObject {
         // 不启动 idle timer，由 processRecording 完成后启动
     }
     
-    /// 停止音频采集的内部实现
+    /// 停止音频采集的内部实现（保持 AVAudioEngine 运行）
     private func stopCapturingInternal() {
-        guard isRecording else {
-            Logger.recordingInfo("Not recording, ignoring")
+        guard isCapturing else {
+            Logger.recordingInfo("Not capturing, ignoring")
             return
         }
         
-        // 只停止时长计时器，保留 pollTimer 用于监听新的采集请求
+        // 停止写入文件，但保持 AVAudioEngine 运行
+        isWritingToFile = false
+        isCapturing = false
+        
+        // 关闭音频文件
+        audioFile = nil
+        
+        // 停止时长计时器
         durationTimer?.invalidate()
         durationTimer = nil
-        Logger.recordingInfo("Duration timer stopped, poll timer kept for idle monitoring")
         
-        // Stop audio engine (停止采集，但保持 audio session)
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        audioEngine?.stop()
-        audioEngine = nil
-        audioFile = nil
-        Logger.recordingInfo("Audio capture stopped, session kept alive")
-        
-        isRecording = false
         let finalDuration = recordingDuration
         recordingDuration = 0
-        Logger.recordingInfo("Capture stopped, duration was: \(String(format: "%.1f", finalDuration))s")
+        Logger.recordingInfo("Capture stopped, duration was: \(String(format: "%.1f", finalDuration))s, engine still running")
         
         // 清零音频电平
         sessionManager.currentAudioLevel = 0.0
         
-        // Update shared state - 停止采集但保持系统录音
+        // 更新共享状态 - 停止采集但保持系统录音
         sessionManager.stopCapturing()
         Logger.recordingInfo("Shared state updated, isCapturing = false, isRecording = true")
     }
     
-    /// 完全停止录音（系统录音+清理状态）
+    /// 完全停止录音（AVAudioEngine + 清理状态）
     func stopRecording() {
         Logger.recordingInfo("stopRecording() called - full stop")
         
@@ -246,11 +281,15 @@ final class BackgroundRecordingService: ObservableObject {
         durationTimer = nil
         Logger.recordingInfo("All timers stopped")
         
+        // 停止写入文件
+        isWritingToFile = false
+        isCapturing = false
+        audioFile = nil
+        
         // Stop audio engine and deactivate session
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
         audioEngine = nil
-        audioFile = nil
         
         // Deactivate audio session
         do {
@@ -308,7 +347,7 @@ final class BackgroundRecordingService: ObservableObject {
         let sessionManager = RecordingSessionManager.shared
         
         // 如果正在采集，检查是否需要停止
-        if isRecording {
+        if isCapturing {
             if sessionManager.shouldStopRecording {
                 Logger.recordingInfo("Stop signal received from keyboard!")
                 Task {
@@ -318,25 +357,15 @@ final class BackgroundRecordingService: ObservableObject {
             return
         }
         
-        // 如果不在采集但系统录音仍在保持（待机状态），检查是否需要重新开始采集
-        if !isRecording && sessionManager.isRecording && !sessionManager.isCapturing {
-            // 先检查 AVAudioSession 是否仍然有效
-            let audioSession = AVAudioSession.sharedInstance()
-            guard audioSession.isOtherAudioPlaying == false || audioSession.category == .playAndRecord else {
-                // AVAudioSession 可能已被其他 App 抢占，重置状态
-                Logger.recordingInfo("AVAudioSession may have been interrupted, resetting state")
-                sessionManager.stopRecording()
-                return
-            }
-            
+        // 如果 AVAudioEngine 运行中但不在采集（待机状态），检查是否需要重新开始采集
+        if isRecording && !isCapturing {
             // 键盘重置了 shouldStopRecording，表示想要开始新的采集
             if !sessionManager.shouldStopRecording {
                 // 检查是否有新的采集请求（通过检查 processingStatus）
                 if sessionManager.processingStatus == .idle || sessionManager.processingStatus == .done {
                     Logger.recordingInfo("Keyboard requested new capture session")
-                    Task {
-                        await restartCapturing()
-                    }
+                    // 直接开始采集，不需要重新创建 AVAudioEngine
+                    startCapturing()
                 }
             }
         }
@@ -345,7 +374,8 @@ final class BackgroundRecordingService: ObservableObject {
     private func startDurationTimer() {
         durationTimer?.invalidate()
         durationTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            self?.recordingDuration = self?.sessionManager.recordingDuration ?? 0
+            guard let self = self, let startTime = self.captureStartTime else { return }
+            self.recordingDuration = Date().timeIntervalSince(startTime)
         }
     }
     
@@ -365,95 +395,6 @@ final class BackgroundRecordingService: ObservableObject {
     private func idleTimerFired() {
         Logger.recordingInfo("Idle timer fired - auto stopping system recording")
         stopRecording()
-    }
-    
-    /// 在系统录音保持状态下重新开始采集
-    private func restartCapturing() async {
-        Logger.recordingInfo("restartCapturing() called")
-        
-        // 取消空闲计时器
-        idleTimer?.invalidate()
-        idleTimer = nil
-        
-        // 先确保 AVAudioSession 仍然有效
-        let session = AVAudioSession.sharedInstance()
-        do {
-            // 重新激活 session，确保它仍然可用
-            try session.setCategory(
-                .playAndRecord,
-                mode: .default,
-                options: [.defaultToSpeaker, .allowBluetooth, .mixWithOthers, .duckOthers]
-            )
-            try session.setActive(true, options: .notifyOthersOnDeactivation)
-            Logger.recordingInfo("AVAudioSession reactivated for restart")
-        } catch {
-            Logger.recordingError("Failed to reactivate AVAudioSession", error: error)
-            // 重置状态，让键盘知道需要重新跳转主 App
-            sessionManager.stopRecording()
-            return
-        }
-        
-        // 获取共享音频文件 URL
-        guard let audioURL = sessionManager.sharedAudioURL else {
-            Logger.recordingError("No shared container URL available")
-            sessionManager.stopRecording()
-            return
-        }
-        
-        // 移除旧文件
-        if FileManager.default.fileExists(atPath: audioURL.path) {
-            try? FileManager.default.removeItem(at: audioURL)
-        }
-        
-        // 设置音频引擎
-        let engine = AVAudioEngine()
-        let inputNode = engine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
-        
-        do {
-            audioFile = try AVAudioFile(forWriting: audioURL, settings: [
-                AVFormatIDKey: kAudioFormatLinearPCM,
-                AVSampleRateKey: format.sampleRate,
-                AVNumberOfChannelsKey: 1,
-                AVLinearPCMBitDepthKey: 16,
-                AVLinearPCMIsFloatKey: false,
-            ])
-        } catch {
-            Logger.recordingError("Failed to create audio file", error: error)
-            sessionManager.stopRecording()
-            return
-        }
-        
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-            guard let self = self else { return }
-            try? self.audioFile?.write(from: buffer)
-            
-            let level = self.calculateAudioLevel(from: buffer)
-            self.sessionManager.currentAudioLevel = level
-        }
-        
-        engine.prepare()
-        do {
-            try engine.start()
-        } catch {
-            Logger.recordingError("Failed to start AVAudioEngine", error: error)
-            // 启动失败，重置状态
-            sessionManager.stopRecording()
-            return
-        }
-        
-        self.audioEngine = engine
-        self.isRecording = true
-        
-        // 更新共享状态
-        sessionManager.startRecording()
-        sessionManager.audioFilePath = audioURL.path
-        
-        // 启动计时器
-        startPollingForStopSignal()
-        startDurationTimer()
-        
-        Logger.recordingInfo("Capture restarted successfully!")
     }
     
     // MARK: - Processing

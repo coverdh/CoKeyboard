@@ -35,6 +35,9 @@ final class VoiceInputController {
     private var polishTokens = 0
     private var pollTimer: Timer?
 
+    private var capturingRequestTime: Date?  // 请求开始采集的时间
+    private let capturingTimeout: TimeInterval = 0.8  // 等待主 App 响应的超时时间（缩短以更快响应）
+
     init() {
         Logger.keyboardInfo("VoiceInputController initialized")
         // 清理残留的处理状态，但保留录音状态
@@ -147,11 +150,28 @@ final class VoiceInputController {
         
         // 检查是否正在采集音频（用户点击录制后的实际采集状态）
         if isCapturing {
+            capturingRequestTime = nil  // 清除请求时间，主 App 已响应
             if case .recording = currentState {
                 // Already in recording state
             } else {
                 Logger.recordingInfo("Detected main app is capturing audio")
                 currentState = .recording
+            }
+            return
+        }
+        
+        // 检查是否正在等待主 App 开始采集
+        if case .recording = currentState, let requestTime = capturingRequestTime {
+            let elapsed = Date().timeIntervalSince(requestTime)
+            if elapsed > capturingTimeout {
+                // 超时：主 App 没有响应，可能已被杀死或 AVAudioSession 失效
+                Logger.recordingInfo("Capture request timed out after \(elapsed)s, main app may not be running")
+                capturingRequestTime = nil
+                // 重置共享状态，强制跳转主 App
+                sessionManager.stopRecording()
+                currentState = .idle
+                // 自动触发跳转主 App
+                triggerSessionActivation()
             }
             return
         }
@@ -221,7 +241,10 @@ final class VoiceInputController {
         Logger.recordingInfo("Requesting start capturing")
         // 重置停止信号，让主 App 知道可以开始采集了
         sessionManager.shouldStopRecording = false
+        // 记录请求时间，用于超时检测
+        capturingRequestTime = Date()
         // 更新状态为录音中，等待主 App 开始采集
+        // 如果主 App 在超时时间内没有响应，会自动跳转主 App
         currentState = .recording
     }
     

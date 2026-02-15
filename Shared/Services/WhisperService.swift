@@ -185,13 +185,18 @@ final class WhisperService {
             }
         }
         
+        // 始终使用 CPU 模式
+        // 原因：iOS 禁止后台 App 使用 GPU，而本 App 的主要使用场景是后台转写
+        // 使用 CPU 模式确保无论前台还是后台都能正常工作
+        Logger.keyboardInfo("Using CPU-only mode for Whisper (required for background processing)")
+        
         let config = WhisperKitConfig(
             modelFolder: modelPath,
             computeOptions: ModelComputeOptions(
-                melCompute: .cpuAndGPU,
-                audioEncoderCompute: .cpuAndGPU,
-                textDecoderCompute: .cpuAndGPU,
-                prefillCompute: .cpuAndGPU
+                melCompute: .cpuOnly,
+                audioEncoderCompute: .cpuOnly,
+                textDecoderCompute: .cpuOnly,
+                prefillCompute: .cpuOnly
             ),
             verbose: true,
             logLevel: .debug,
