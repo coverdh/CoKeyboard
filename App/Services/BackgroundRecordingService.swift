@@ -3,12 +3,14 @@ import AVFoundation
 import SwiftData
 
 /// 后台录音服务 - 在主App中运行，监听键盘的停止信号
+@MainActor
 final class BackgroundRecordingService: ObservableObject {
     static let shared = BackgroundRecordingService()
     
     private var audioEngine: AVAudioEngine?
     private var audioFile: AVAudioFile?
     private var pollTimer: Timer?
+    private var idleTimer: Timer?           // 空闲计时器，用于自动停止系统录音
     private let sessionManager = RecordingSessionManager.shared
     
     @Published var isRecording = false
@@ -18,6 +20,73 @@ final class BackgroundRecordingService: ObservableObject {
     
     private init() {
         Logger.recordingInfo("BackgroundRecordingService initialized")
+        setupAudioSessionNotifications()
+    }
+    
+    // MARK: - Audio Session Notifications
+    
+    private func setupAudioSessionNotifications() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioSessionInterruption),
+            name: AVAudioSession.interruptionNotification,
+            object: nil
+        )
+        
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioSessionRouteChange),
+            name: AVAudioSession.routeChangeNotification,
+            object: nil
+        )
+    }
+    
+    @objc private func handleAudioSessionInterruption(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
+            return
+        }
+        
+        switch type {
+        case .began:
+            Logger.recordingInfo("Audio session interrupted - pausing recording")
+            // 系统中断了音频会话（如来电），需要处理
+            if isRecording {
+                // 保存当前文件，停止采集
+                stopCapturingInternal()
+            }
+        case .ended:
+            Logger.recordingInfo("Audio session interruption ended")
+            // 中断结束，可以尝试恢复
+            if let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt {
+                let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
+                if options.contains(.shouldResume) {
+                    Logger.recordingInfo("Audio session can resume")
+                    // 不自动恢复，让用户重新点击录音按钮
+                }
+            }
+        @unknown default:
+            break
+        }
+    }
+    
+    @objc private func handleAudioSessionRouteChange(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let reasonValue = userInfo[AVAudioSessionRouteChangeReasonKey] as? UInt,
+              let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else {
+            return
+        }
+        
+        switch reason {
+        case .oldDeviceUnavailable:
+            Logger.recordingInfo("Audio route changed - device unavailable")
+            // 耳机拔出等情况，可能需要停止录音
+        case .newDeviceAvailable:
+            Logger.recordingInfo("Audio route changed - new device available")
+        default:
+            break
+        }
     }
     
     // MARK: - Recording Control
@@ -29,13 +98,19 @@ final class BackgroundRecordingService: ObservableObject {
             return 
         }
         
-        // Configure audio session
-        Logger.recordingInfo("Configuring AVAudioSession...")
+        // Configure audio session for background recording
+        Logger.recordingInfo("Configuring AVAudioSession for background...")
         let session = AVAudioSession.sharedInstance()
         do {
-            try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothA2DP])
-            try session.setActive(true)
-            Logger.recordingInfo("AVAudioSession configured successfully")
+            // 使用 .playAndRecord 并添加 .mixWithOthers 支持后台录音
+            // .duckOthers 让其他音频降低音量而不是完全停止
+            try session.setCategory(
+                .playAndRecord,
+                mode: .default,
+                options: [.defaultToSpeaker, .allowBluetooth, .mixWithOthers, .duckOthers]
+            )
+            try session.setActive(true, options: .notifyOthersOnDeactivation)
+            Logger.recordingInfo("AVAudioSession configured successfully for background")
         } catch {
             Logger.recordingError("Failed to configure AVAudioSession", error: error)
             throw error
@@ -111,31 +186,82 @@ final class BackgroundRecordingService: ObservableObject {
         Logger.recordingInfo("Recording started successfully!")
     }
     
-    func stopRecording() {
-        Logger.recordingInfo("stopRecording() called")
-        guard isRecording else { 
+    /// 停止音频采集，但保持系统录音（进入待机状态）
+    func stopCapturing() {
+        Logger.recordingInfo("stopCapturing() called - entering idle state")
+        stopCapturingInternal()
+        // 启动空闲计时器，自动停止系统录音
+        startIdleTimer()
+    }
+    
+    /// 停止音频采集用于处理（不启动 idle timer，由 processRecording 完成后手动启动）
+    private func stopCapturingForProcessing() {
+        Logger.recordingInfo("stopCapturingForProcessing() called - will process audio")
+        stopCapturingInternal()
+        // 不启动 idle timer，由 processRecording 完成后启动
+    }
+    
+    /// 停止音频采集的内部实现
+    private func stopCapturingInternal() {
+        guard isRecording else {
             Logger.recordingInfo("Not recording, ignoring")
-            return 
+            return
         }
         
-        // Stop timers
-        pollTimer?.invalidate()
-        pollTimer = nil
+        // 只停止时长计时器，保留 pollTimer 用于监听新的采集请求
         durationTimer?.invalidate()
         durationTimer = nil
-        Logger.recordingInfo("Timers stopped")
+        Logger.recordingInfo("Duration timer stopped, poll timer kept for idle monitoring")
         
-        // Stop audio engine
+        // Stop audio engine (停止采集，但保持 audio session)
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
         audioEngine = nil
         audioFile = nil
-        Logger.recordingInfo("AVAudioEngine stopped")
+        Logger.recordingInfo("Audio capture stopped, session kept alive")
         
         isRecording = false
         let finalDuration = recordingDuration
         recordingDuration = 0
-        Logger.recordingInfo("Recording stopped, duration was: \(String(format: "%.1f", finalDuration))s")
+        Logger.recordingInfo("Capture stopped, duration was: \(String(format: "%.1f", finalDuration))s")
+        
+        // 清零音频电平
+        sessionManager.currentAudioLevel = 0.0
+        
+        // Update shared state - 停止采集但保持系统录音
+        sessionManager.stopCapturing()
+        Logger.recordingInfo("Shared state updated, isCapturing = false, isRecording = true")
+    }
+    
+    /// 完全停止录音（系统录音+清理状态）
+    func stopRecording() {
+        Logger.recordingInfo("stopRecording() called - full stop")
+        
+        // Stop all timers
+        pollTimer?.invalidate()
+        pollTimer = nil
+        idleTimer?.invalidate()
+        idleTimer = nil
+        durationTimer?.invalidate()
+        durationTimer = nil
+        Logger.recordingInfo("All timers stopped")
+        
+        // Stop audio engine and deactivate session
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine?.stop()
+        audioEngine = nil
+        audioFile = nil
+        
+        // Deactivate audio session
+        do {
+            try AVAudioSession.sharedInstance().setActive(false)
+            Logger.recordingInfo("AVAudioSession deactivated")
+        } catch {
+            Logger.recordingError("Failed to deactivate AVAudioSession", error: error)
+        }
+        
+        isRecording = false
+        recordingDuration = 0
         
         // 清零音频电平
         sessionManager.currentAudioLevel = 0.0
@@ -173,7 +299,46 @@ final class BackgroundRecordingService: ObservableObject {
         Logger.recordingInfo("Starting stop signal polling (interval: 0.3s)")
         pollTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
-            self?.checkStopSignal()
+            self?.checkSignals()
+        }
+    }
+    
+    /// 检查键盘发来的信号（停止或重新开始采集）
+    private func checkSignals() {
+        let sessionManager = RecordingSessionManager.shared
+        
+        // 如果正在采集，检查是否需要停止
+        if isRecording {
+            if sessionManager.shouldStopRecording {
+                Logger.recordingInfo("Stop signal received from keyboard!")
+                Task {
+                    await processRecording()
+                }
+            }
+            return
+        }
+        
+        // 如果不在采集但系统录音仍在保持（待机状态），检查是否需要重新开始采集
+        if !isRecording && sessionManager.isRecording && !sessionManager.isCapturing {
+            // 先检查 AVAudioSession 是否仍然有效
+            let audioSession = AVAudioSession.sharedInstance()
+            guard audioSession.isOtherAudioPlaying == false || audioSession.category == .playAndRecord else {
+                // AVAudioSession 可能已被其他 App 抢占，重置状态
+                Logger.recordingInfo("AVAudioSession may have been interrupted, resetting state")
+                sessionManager.stopRecording()
+                return
+            }
+            
+            // 键盘重置了 shouldStopRecording，表示想要开始新的采集
+            if !sessionManager.shouldStopRecording {
+                // 检查是否有新的采集请求（通过检查 processingStatus）
+                if sessionManager.processingStatus == .idle || sessionManager.processingStatus == .done {
+                    Logger.recordingInfo("Keyboard requested new capture session")
+                    Task {
+                        await restartCapturing()
+                    }
+                }
+            }
         }
     }
     
@@ -184,22 +349,125 @@ final class BackgroundRecordingService: ObservableObject {
         }
     }
     
-    private func checkStopSignal() {
-        guard sessionManager.shouldStopRecording else { return }
+    // MARK: - Idle Timer (自动停止系统录音)
+    
+    private func startIdleTimer() {
+        let settings = AppSettings.shared
+        let duration = settings.voiceBackgroundDuration
         
-        Logger.recordingInfo("Stop signal received from keyboard!")
-        
-        // Keyboard requested stop - process the recording
-        Task {
-            await processRecording()
+        Logger.recordingInfo("Starting idle timer for \(duration)s")
+        idleTimer?.invalidate()
+        idleTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(duration), repeats: false) { [weak self] _ in
+            self?.idleTimerFired()
         }
+    }
+    
+    private func idleTimerFired() {
+        Logger.recordingInfo("Idle timer fired - auto stopping system recording")
+        stopRecording()
+    }
+    
+    /// 在系统录音保持状态下重新开始采集
+    private func restartCapturing() async {
+        Logger.recordingInfo("restartCapturing() called")
+        
+        // 取消空闲计时器
+        idleTimer?.invalidate()
+        idleTimer = nil
+        
+        // 先确保 AVAudioSession 仍然有效
+        let session = AVAudioSession.sharedInstance()
+        do {
+            // 重新激活 session，确保它仍然可用
+            try session.setCategory(
+                .playAndRecord,
+                mode: .default,
+                options: [.defaultToSpeaker, .allowBluetooth, .mixWithOthers, .duckOthers]
+            )
+            try session.setActive(true, options: .notifyOthersOnDeactivation)
+            Logger.recordingInfo("AVAudioSession reactivated for restart")
+        } catch {
+            Logger.recordingError("Failed to reactivate AVAudioSession", error: error)
+            // 重置状态，让键盘知道需要重新跳转主 App
+            sessionManager.stopRecording()
+            return
+        }
+        
+        // 获取共享音频文件 URL
+        guard let audioURL = sessionManager.sharedAudioURL else {
+            Logger.recordingError("No shared container URL available")
+            sessionManager.stopRecording()
+            return
+        }
+        
+        // 移除旧文件
+        if FileManager.default.fileExists(atPath: audioURL.path) {
+            try? FileManager.default.removeItem(at: audioURL)
+        }
+        
+        // 设置音频引擎
+        let engine = AVAudioEngine()
+        let inputNode = engine.inputNode
+        let format = inputNode.outputFormat(forBus: 0)
+        
+        do {
+            audioFile = try AVAudioFile(forWriting: audioURL, settings: [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVSampleRateKey: format.sampleRate,
+                AVNumberOfChannelsKey: 1,
+                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMIsFloatKey: false,
+            ])
+        } catch {
+            Logger.recordingError("Failed to create audio file", error: error)
+            sessionManager.stopRecording()
+            return
+        }
+        
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+            guard let self = self else { return }
+            try? self.audioFile?.write(from: buffer)
+            
+            let level = self.calculateAudioLevel(from: buffer)
+            self.sessionManager.currentAudioLevel = level
+        }
+        
+        engine.prepare()
+        do {
+            try engine.start()
+        } catch {
+            Logger.recordingError("Failed to start AVAudioEngine", error: error)
+            // 启动失败，重置状态
+            sessionManager.stopRecording()
+            return
+        }
+        
+        self.audioEngine = engine
+        self.isRecording = true
+        
+        // 更新共享状态
+        sessionManager.startRecording()
+        sessionManager.audioFilePath = audioURL.path
+        
+        // 启动计时器
+        startPollingForStopSignal()
+        startDurationTimer()
+        
+        Logger.recordingInfo("Capture restarted successfully!")
     }
     
     // MARK: - Processing
     
     private func processRecording() async {
         Logger.processingInfo("processRecording() started")
-        stopRecording()
+        stopCapturingForProcessing()  // 不启动 idle timer
+        
+        defer {
+            // 处理完成后启动 idle timer
+            Task { @MainActor in
+                startIdleTimer()
+            }
+        }
         
         guard let audioURL = sessionManager.sharedAudioURL else {
             Logger.processingError("No shared audio URL")

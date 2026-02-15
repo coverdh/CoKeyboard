@@ -235,67 +235,184 @@ final class WhisperService {
         do {
             let settings = AppSettings.shared
             
-            // 确定主语言：传入参数 > App设置
-            let primaryLang: String? = language ?? (settings.speechRecognitionLanguage == "auto" ? nil : settings.speechRecognitionLanguage)
+            // 检查是否需要中英混合识别模式
+            let primaryLang = language ?? settings.speechRecognitionLanguage
+            let secondaryLang = settings.speechSecondaryLanguage
             
-            // 使用主语言进行转录
-            let primaryResult = try await performTranscription(kit: kit, audioURL: audioURL, language: primaryLang)
+            // 判断是否为中英混合模式（主语言和辅助语言分别是中文和英文）
+            let isMixedMode = isChineseEnglishMixedMode(primary: primaryLang, secondary: secondaryLang)
             
-            // 检查是否包含 "foreign language" 提示，并且有辅助语言可用
-            if primaryResult.text.contains("[Speaking in foreign language]") ||
-               primaryResult.text.contains("[说外语]") {
-                
-                // 获取辅助语言（必须与主语言不同）
-                if let secondaryLang = settings.speechSecondaryLanguage,
-                   secondaryLang != primaryLang {
-                    Logger.keyboardInfo("Primary language detected foreign speech, trying secondary language: \(secondaryLang)")
-                    
-                    let secondaryResult = try await performTranscription(kit: kit, audioURL: audioURL, language: secondaryLang)
-                    
-                    // 如果辅助语言识别结果更好（不包含 foreign language 提示），使用辅助语言结果
-                    if !secondaryResult.text.contains("[Speaking in foreign language]") &&
-                       !secondaryResult.text.contains("[说外语]") &&
-                       !secondaryResult.text.isEmpty {
-                        Logger.keyboardInfo("Using secondary language result: \(secondaryResult.text.prefix(50))...")
-                        return secondaryResult
-                    }
-                }
+            if isMixedMode {
+                // 中英混合模式：使用自动语言检测 + 双语提示词
+                Logger.keyboardInfo("Using Chinese-English mixed mode")
+                return try await performMixedLanguageTranscription(kit: kit, audioURL: audioURL)
+            } else if primaryLang == "auto" {
+                // 自动检测模式
+                Logger.keyboardInfo("Using automatic language detection")
+                return try await performTranscription(kit: kit, audioURL: audioURL, language: nil, prompt: nil)
+            } else {
+                // 单语言模式
+                Logger.keyboardInfo("Using single language mode: \(primaryLang)")
+                return try await performTranscription(kit: kit, audioURL: audioURL, language: primaryLang, prompt: nil)
             }
-            
-            return primaryResult
         } catch {
             Logger.keyboardError("Transcription failed: \(error.localizedDescription)", error: error)
             throw WhisperServiceError.transcriptionFailed
         }
     }
     
-    /// 执行单次转录
-    private func performTranscription(kit: WhisperKit, audioURL: URL, language: String?) async throws -> TranscriptionResult {
+    /// 判断是否为中英混合模式
+    private func isChineseEnglishMixedMode(primary: String, secondary: String?) -> Bool {
+        let chineseLanguages = ["zh", "zh-CN", "zh-TW", "zh-HK", "chinese"]
+        let englishLanguages = ["en", "en-US", "en-GB", "english"]
+        
+        let isPrimaryChinese = chineseLanguages.contains { primary.lowercased().hasPrefix($0.lowercased()) }
+        let isPrimaryEnglish = englishLanguages.contains { primary.lowercased().hasPrefix($0.lowercased()) }
+        
+        guard let secondary = secondary else { return false }
+        let isSecondaryChinese = chineseLanguages.contains { secondary.lowercased().hasPrefix($0.lowercased()) }
+        let isSecondaryEnglish = englishLanguages.contains { secondary.lowercased().hasPrefix($0.lowercased()) }
+        
+        // 主语言中文+辅助语言英文 或 主语言英文+辅助语言中文
+        return (isPrimaryChinese && isSecondaryEnglish) || (isPrimaryEnglish && isSecondaryChinese)
+    }
+    
+    /// 执行中英混合语言转录
+    private func performMixedLanguageTranscription(kit: WhisperKit, audioURL: URL) async throws -> TranscriptionResult {
+        Logger.keyboardInfo("Performing mixed Chinese-English transcription with detectLanguage=true")
+        
+        // 中英混合模式的关键设置：
+        // 1. language = nil：不指定语言
+        // 2. detectLanguage = true：启用语言检测，让模型在每个segment自动识别语言
+        // 3. usePrefillPrompt = false：不使用预填充提示，避免强制单一语言
+        let options = DecodingOptions(
+            verbose: true,
+            task: .transcribe,
+            language: nil,  // 关键：不指定语言
+            temperature: 0.0,
+            temperatureIncrementOnFallback: 0.2,
+            temperatureFallbackCount: 5,
+            sampleLength: 224,
+            topK: 5,
+            usePrefillPrompt: false,  // 关键：禁用预填充，让模型自由检测
+            usePrefillCache: false,
+            detectLanguage: true,  // 关键：启用语言检测
+            skipSpecialTokens: true,
+            withoutTimestamps: true,
+            wordTimestamps: false,
+            clipTimestamps: [],
+            suppressBlank: true,
+            supressTokens: [],
+            compressionRatioThreshold: 2.4,
+            logProbThreshold: -1.0,
+            firstTokenLogProbThreshold: -1.5,
+            noSpeechThreshold: 0.6
+        )
+        
+        let results = try await kit.transcribe(audioPath: audioURL.path(), decodeOptions: options)
+        let text = results.map { $0.text }.joined(separator: " ").trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+        let tokenCount = text.count / 4
+        
+        // 清理结果中可能的标记
+        let cleanedText = cleanTranscriptionResult(text)
+        
+        Logger.keyboardInfo("Mixed transcription result: \(cleanedText.prefix(50))...")
+        return TranscriptionResult(text: cleanedText, tokenCount: tokenCount)
+    }
+    
+    /// 清理转录结果中的标记
+    private func cleanTranscriptionResult(_ text: String) -> String {
+        var cleaned = text
+        
+        // 移除常见的无效标记
+        let patternsToRemove = [
+            "\\[Speaking in foreign language\\]",
+            "\\[说外语\\]",
+            "\\[BLANK_AUDIO\\]",
+            "\\[音乐\\]",
+            "\\[Music\\]",
+            "\\( 音乐 \\)",
+            "\\(音乐\\)"
+        ]
+        
+        for pattern in patternsToRemove {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
+                cleaned = regex.stringByReplacingMatches(
+                    in: cleaned,
+                    options: [],
+                    range: NSRange(cleaned.startIndex..., in: cleaned),
+                    withTemplate: ""
+                )
+            }
+        }
+        
+        // 清理多余的空格
+        cleaned = cleaned.replacingOccurrences(of: "  +", with: " ", options: .regularExpression)
+        cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        return cleaned
+    }
+    
+    /// 执行单次转录（指定语言模式）
+    private func performTranscription(kit: WhisperKit, audioURL: URL, language: String?, prompt: String?) async throws -> TranscriptionResult {
         let options: DecodingOptions
+        
         if let lang = language {
-            Logger.keyboardInfo("Transcribing with language: \(lang)")
+            Logger.keyboardInfo("Transcribing with specified language: \(lang)")
             options = DecodingOptions(
+                verbose: true,
                 task: .transcribe,
                 language: lang,
                 temperature: 0.0,
+                temperatureIncrementOnFallback: 0.2,
+                temperatureFallbackCount: 3,
                 sampleLength: 224,
+                topK: 5,
                 usePrefillPrompt: true,
-                usePrefillCache: true
+                usePrefillCache: true,
+                detectLanguage: false,
+                skipSpecialTokens: true,
+                withoutTimestamps: true,
+                wordTimestamps: false,
+                clipTimestamps: [],
+                suppressBlank: true,
+                supressTokens: [],
+                compressionRatioThreshold: 2.4,
+                logProbThreshold: -1.0,
+                firstTokenLogProbThreshold: -1.5,
+                noSpeechThreshold: 0.6
             )
         } else {
+            // 自动语言检测模式
             Logger.keyboardInfo("Transcribing with automatic language detection")
             options = DecodingOptions(
+                verbose: true,
                 task: .transcribe,
+                language: nil,
                 temperature: 0.0,
+                temperatureIncrementOnFallback: 0.2,
+                temperatureFallbackCount: 5,
                 sampleLength: 224,
+                topK: 5,
                 usePrefillPrompt: false,
-                usePrefillCache: false
+                usePrefillCache: false,
+                detectLanguage: true,
+                skipSpecialTokens: true,
+                withoutTimestamps: true,
+                wordTimestamps: false,
+                clipTimestamps: [],
+                suppressBlank: true,
+                supressTokens: [],
+                compressionRatioThreshold: 2.4,
+                logProbThreshold: -1.0,
+                firstTokenLogProbThreshold: -1.5,
+                noSpeechThreshold: 0.6
             )
         }
         
         let results = try await kit.transcribe(audioPath: audioURL.path(), decodeOptions: options)
         let text = results.map { $0.text }.joined(separator: " ").trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-        let tokenCount = text.count / 4  // rough estimate
+        let tokenCount = text.count / 4
         
         Logger.keyboardInfo("Transcription result: \(text.prefix(50))...")
         return TranscriptionResult(text: text, tokenCount: tokenCount)

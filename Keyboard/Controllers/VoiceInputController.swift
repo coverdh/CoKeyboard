@@ -37,8 +37,16 @@ final class VoiceInputController {
 
     init() {
         Logger.keyboardInfo("VoiceInputController initialized")
-        // 强制重置所有共享状态（调试用）
-        sessionManager.reset()
+        // 清理残留的处理状态，但保留录音状态
+        cleanupStaleState()
+        // 检查是否有待处理的结果
+        if sessionManager.processingStatus == .done {
+            if let result = sessionManager.consumePendingResult(), !result.isEmpty {
+                Logger.processingInfo("Found pending result on init: \(result.prefix(50))...")
+                // 结果会在 onTextReady 设置后通知
+            }
+            sessionManager.processingStatus = .idle
+        }
         // 默认状态为等待录制
         currentState = .idle
         startPolling()
@@ -84,10 +92,11 @@ final class VoiceInputController {
     
     private func checkSharedState() {
         let isRecording = sessionManager.isRecording
+        let isCapturing = sessionManager.isCapturing
         let processingStatus = sessionManager.processingStatus
         
-        // 轮询音频电平 (录音时)
-        if isRecording {
+        // 轮询音频电平 (采集时)
+        if isCapturing {
             let audioLevel = sessionManager.currentAudioLevel
             onAudioLevelUpdated?(audioLevel)
         }
@@ -98,29 +107,20 @@ final class VoiceInputController {
             onProgressUpdated?(progress)
         }
         
-        // Check if main app is recording
-        if isRecording {
-            if case .recording = currentState {
-                // Already in recording state
-            } else {
-                Logger.recordingInfo("Detected main app is recording")
-                currentState = .recording
-            }
-            return
-        }
-        
-        // Check processing status
+        // 优先检查 processingStatus，避免处理中被 isRecording 状态覆盖
         switch processingStatus {
         case .transcribing:
             if case .transcribing = currentState { } else {
                 Logger.processingInfo("Main app is transcribing")
                 currentState = .transcribing
             }
+            return
         case .polishing:
             if case .polishing = currentState { } else {
                 Logger.processingInfo("Main app is polishing")
                 currentState = .polishing
             }
+            return
         case .done:
             Logger.processingInfo("Processing done, consuming result")
             if let result = sessionManager.consumePendingResult() {
@@ -133,21 +133,40 @@ final class VoiceInputController {
                 sessionManager.processingStatus = .idle
                 currentState = .idle
             }
+            return
         case .error:
             Logger.processingError("Main app reported processing error")
             currentState = .error("Processing failed")
             sessionManager.processingStatus = .idle
             resetAfterDelay()
-        case .recording:
-            // Still recording in main app
+            return
+        case .recording, .idle:
+            // 继续检查录音状态
             break
-        case .idle:
-            // Only reset to idle if we were in a processing state
+        }
+        
+        // 检查是否正在采集音频（用户点击录制后的实际采集状态）
+        if isCapturing {
+            if case .recording = currentState {
+                // Already in recording state
+            } else {
+                Logger.recordingInfo("Detected main app is capturing audio")
+                currentState = .recording
+            }
+            return
+        }
+        
+        // 如果 processingStatus 是 idle 且不在采集，重置状态
+        if processingStatus == .idle {
             if case .transcribing = currentState {
                 Logger.keyboardInfo("Resetting from transcribing to idle")
                 currentState = .idle
             } else if case .polishing = currentState {
                 Logger.keyboardInfo("Resetting from polishing to idle")
+                currentState = .idle
+            } else if case .recording = currentState {
+                // 如果之前在录制但现在不在采集了，重置为 idle
+                Logger.keyboardInfo("Resetting from recording to idle (capture stopped)")
                 currentState = .idle
             }
         }
@@ -170,15 +189,21 @@ final class VoiceInputController {
 
     func toggleRecording() {
         Logger.keyboardInfo("toggleRecording called, current state: \(stateDescription(currentState))")
-        Logger.keyboardInfo("isRecording: \(sessionManager.isRecording), shouldStop: \(sessionManager.shouldStopRecording)")
+        Logger.keyboardInfo("isRecording: \(sessionManager.isRecording), isCapturing: \(sessionManager.isCapturing), shouldStop: \(sessionManager.shouldStopRecording)")
         
         switch currentState {
         case .idle, .needsSession, .error:
-            // Check if main app is already recording
-            if sessionManager.isRecording {
-                Logger.recordingInfo("Main app is recording, requesting stop")
-                requestStopRecording()
+            // Check if main app has active recording session (within idle timeout)
+            let settings = AppSettings.shared
+            let isSessionActive = sessionManager.isRecordingStillActive(maxIdleSeconds: settings.voiceBackgroundDuration)
+            
+            if isSessionActive {
+                // 系统录音仍在保持时间内，可以直接开始采集
+                Logger.recordingInfo("Recording session is still active, starting capture directly")
+                // 通知主 App 重新开始采集
+                requestStartCapturing()
             } else {
+                // 需要跳转主 App 启动系统录音
                 Logger.recordingInfo("Need to start recording via main app")
                 triggerSessionActivation()
             }
@@ -189,6 +214,15 @@ final class VoiceInputController {
             Logger.keyboardInfo("Ignoring tap - busy processing")
             break
         }
+    }
+    
+    /// 请求主 App 开始采集（系统录音已处于活跃状态）
+    private func requestStartCapturing() {
+        Logger.recordingInfo("Requesting start capturing")
+        // 重置停止信号，让主 App 知道可以开始采集了
+        sessionManager.shouldStopRecording = false
+        // 更新状态为录音中，等待主 App 开始采集
+        currentState = .recording
     }
     
     private func requestStopRecording() {

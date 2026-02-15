@@ -78,16 +78,29 @@ struct CoKeyboardApp: App {
                 // Small delay to ensure recording started
                 try? await Task.sleep(for: .milliseconds(300))
                 
-                // Return to source app
-                if let returnURL = RecordingSessionManager.shared.returnURL(for: sourceBundleID) {
-                    await MainActor.run {
-                        UIApplication.shared.open(returnURL, options: [:], completionHandler: nil)
-                    }
+                // 尝试返回源 App
+                await MainActor.run {
+                    returnToSourceApp()
                 }
             } catch {
                 print("Failed to start recording: \(error)")
             }
         }
+    }
+    
+    /// 尝试返回源 App
+    private func returnToSourceApp() {
+        // 1. 先尝试使用已知的 bundleID
+        if let returnURL = RecordingSessionManager.shared.returnURL(for: sourceBundleID) {
+            Logger.recordingInfo("Returning to source app via URL: \(returnURL)")
+            UIApplication.shared.open(returnURL, options: [:], completionHandler: nil)
+            return
+        }
+        
+        // 2. 如果没有 bundleID，显示提示让用户手动切换
+        Logger.recordingInfo("No source bundle ID, user needs to switch manually")
+        // 录音已开始，用户可以通过系统手势切换回原 App
+        // RecordingOverlayView 会显示相应提示
     }
 }
 
@@ -99,6 +112,7 @@ struct RecordingOverlayView: View {
     
     @EnvironmentObject var recordingService: BackgroundRecordingService
     @State private var permissionDenied = false
+    @State private var showReturnHint = false
     
     private let sessionManager = RecordingSessionManager.shared
 
@@ -126,23 +140,40 @@ struct RecordingOverlayView: View {
                         .font(.system(size: 48, weight: .light, design: .monospaced))
                         .foregroundStyle(.white)
                     
-                    Text("Recording in background...\nReturn to keyboard to stop")
-                        .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.6))
-                        .multilineTextAlignment(.center)
-                    
-                    Button(action: {
-                        if let returnURL = sessionManager.returnURL(for: sourceBundleID) {
-                            UIApplication.shared.open(returnURL, options: [:], completionHandler: nil)
-                        }
-                    }) {
-                        Label("Return to App", systemImage: "arrow.uturn.backward")
+                    // 显示返回提示
+                    VStack(spacing: 8) {
+                        Text("录音已在后台运行")
                             .font(.headline)
                             .foregroundStyle(.white)
-                            .padding(.horizontal, 32)
-                            .padding(.vertical, 12)
-                            .background(Color.blue.opacity(0.8))
-                            .clipShape(Capsule())
+                        
+                        if sourceBundleID != nil {
+                            Text("点击下方按钮返回键盘")
+                                .font(.subheadline)
+                                .foregroundStyle(.white.opacity(0.7))
+                        } else {
+                            Text("请使用系统手势\n从屏幕底部上滑返回键盘")
+                                .font(.subheadline)
+                                .foregroundStyle(.white.opacity(0.7))
+                                .multilineTextAlignment(.center)
+                        }
+                    }
+                    .padding(.top, 8)
+                    
+                    // 返回按钮（如果有源 App）
+                    if sourceBundleID != nil {
+                        Button(action: {
+                            if let returnURL = sessionManager.returnURL(for: sourceBundleID) {
+                                UIApplication.shared.open(returnURL, options: [:], completionHandler: nil)
+                            }
+                        }) {
+                            Label("返回键盘", systemImage: "arrow.uturn.backward")
+                                .font(.headline)
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 32)
+                                .padding(.vertical, 12)
+                                .background(Color.blue.opacity(0.8))
+                                .clipShape(Capsule())
+                        }
                     }
                 }
                 
@@ -159,7 +190,7 @@ struct RecordingOverlayView: View {
                                 UIApplication.shared.open(settingsURL)
                             }
                         }) {
-                            Label("Open Settings", systemImage: "gear")
+                            Label("打开设置", systemImage: "gear")
                                 .font(.headline)
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 32)
@@ -167,9 +198,9 @@ struct RecordingOverlayView: View {
                                 .background(Color.blue.opacity(0.8))
                                 .clipShape(Capsule())
                         }
-
+                        
                         Button(action: onDismiss) {
-                            Text("Cancel")
+                            Text("取消")
                                 .font(.subheadline)
                                 .foregroundStyle(.white.opacity(0.7))
                         }
@@ -223,16 +254,16 @@ struct RecordingOverlayView: View {
 
     private var statusMessage: String {
         if permissionDenied {
-            return "Microphone access denied.\nPlease enable in Settings."
+            return "麦克风权限被拒绝\n请在设置中开启"
         } else if recordingService.isRecording {
-            return "Recording..."
+            return "录音中..."
         } else {
             switch sessionManager.processingStatus {
-            case .transcribing: return "Transcribing..."
-            case .polishing: return "Polishing..."
-            case .done: return "Done!"
-            case .error: return "Processing failed"
-            default: return "Starting..."
+            case .transcribing: return "正在转写..."
+            case .polishing: return "正在润色..."
+            case .done: return "完成!"
+            case .error: return "处理失败"
+            default: return "启动中..."
             }
         }
     }
@@ -246,7 +277,7 @@ struct RecordingOverlayView: View {
                 }
                 onDismiss()
             }) {
-                Label("Return to App", systemImage: "arrow.uturn.backward")
+                Label("返回", systemImage: "arrow.uturn.backward")
                     .font(.headline)
                     .foregroundStyle(.white)
                     .padding(.horizontal, 32)
