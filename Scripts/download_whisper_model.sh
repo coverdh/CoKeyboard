@@ -62,6 +62,8 @@ echo ""
 echo "下载 tokenizer 文件..."
 TOKENIZER_MODEL="${MODEL_NAME#openai_whisper-}"  # 提取模型名称，如 tiny
 curl -sL "https://huggingface.co/openai/whisper-${TOKENIZER_MODEL}/resolve/main/tokenizer.json" -o "$MODELS_DIR/$MODEL_NAME/tokenizer.json"
+curl -sL "https://huggingface.co/openai/whisper-${TOKENIZER_MODEL}/resolve/main/tokenizer_config.json" -o "$MODELS_DIR/$MODEL_NAME/tokenizer_config.json"
+curl -sL "https://huggingface.co/openai/whisper-${TOKENIZER_MODEL}/resolve/main/preprocessor_config.json" -o "$MODELS_DIR/$MODEL_NAME/preprocessor_config.json"
 curl -sL "https://huggingface.co/openai/whisper-${TOKENIZER_MODEL}/resolve/main/vocab.json" -o "$MODELS_DIR/$MODEL_NAME/vocab.json"
 curl -sL "https://huggingface.co/openai/whisper-${TOKENIZER_MODEL}/resolve/main/merges.txt" -o "$MODELS_DIR/$MODEL_NAME/merges.txt"
 curl -sL "https://huggingface.co/openai/whisper-${TOKENIZER_MODEL}/resolve/main/added_tokens.json" -o "$MODELS_DIR/$MODEL_NAME/added_tokens.json"

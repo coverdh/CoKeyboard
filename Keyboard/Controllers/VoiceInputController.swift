@@ -35,8 +35,8 @@ final class VoiceInputController {
 
     init() {
         Logger.keyboardInfo("VoiceInputController initialized")
-        // 清理可能的残留状态
-        cleanupStaleState()
+        // 强制重置所有共享状态（调试用）
+        sessionManager.reset()
         // 默认状态为等待录制
         currentState = .idle
         startPolling()

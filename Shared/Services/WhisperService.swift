@@ -7,8 +7,8 @@ final class WhisperService {
     private var whisperKit: WhisperKit?
     private var isLoading = false
     
-    // 内置模型名称
-    private let modelName = "openai_whisper-tiny"
+    // 内置模型名称 (base 模型对中英文混合识别效果更好)
+    private let modelName = "openai_whisper-base"
 
     private init() {}
 
@@ -60,7 +60,8 @@ final class WhisperService {
                 // 复制所有模型文件
                 let filesToCopy = [
                     "AudioEncoder.mlmodelc", "MelSpectrogram.mlmodelc", "TextDecoder.mlmodelc",
-                    "tokenizer.json", "config.json", "vocab.json", "merges.txt",
+                    "tokenizer.json", "tokenizer_config.json", "preprocessor_config.json",
+                    "config.json", "vocab.json", "merges.txt",
                     "added_tokens.json", "special_tokens_map.json", "normalizer.json",
                     "generation_config.json"
                 ]
@@ -122,11 +123,12 @@ final class WhisperService {
         
         // 设置 Hugging Face 缓存目录为模型目录，这样 WhisperKit 会在这里查找 tokenizer
         if let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
-            let hubCachePath = documentsPath.appendingPathComponent("huggingface/models/openai/whisper-tiny")
+            let hubCachePath = documentsPath.appendingPathComponent("huggingface/models/openai/whisper-base")
             try? FileManager.default.createDirectory(at: hubCachePath, withIntermediateDirectories: true)
             
             // 复制 tokenizer 文件到 Hugging Face 缓存目录
-            let tokenizerFiles = ["tokenizer.json", "config.json", "vocab.json", "merges.txt", 
+            let tokenizerFiles = ["tokenizer.json", "tokenizer_config.json", "preprocessor_config.json",
+                                  "config.json", "vocab.json", "merges.txt",
                                   "added_tokens.json", "special_tokens_map.json", "normalizer.json",
                                   "generation_config.json"]
             for file in tokenizerFiles {
@@ -231,20 +233,36 @@ final class WhisperService {
         Logger.keyboardInfo("Starting transcription for: \(audioURL.path)")
 
         do {
-            // 语言设置优先级：传入参数 > 系统语言 > 自动检测
-            let targetLanguage: String? = language ?? getSystemLanguageCode()
-            Logger.keyboardInfo("Using language: \(targetLanguage ?? "auto-detect")")
+            // 确定语言设置：传入参数 > App设置 > 自动检测
+            let settings = AppSettings.shared
+            let targetLang: String? = language ?? (settings.speechRecognitionLanguage == "auto" ? nil : settings.speechRecognitionLanguage)
             
             // 配置转录选项，支持多语言识别
-            // 将 language 设为 nil 可让 Whisper 自动检测语言（支持中英文混合）
-            let options = DecodingOptions(
-                task: .transcribe,       // 转录任务（非翻译）
-                language: targetLanguage, // nil 表示自动检测语言
-                temperature: 0.0,        // 贪婪解码，最准确
-                sampleLength: 224,       // 最大采样长度
-                usePrefillPrompt: true,
-                usePrefillCache: true
-            )
+            // 注意：WhisperKit 的 language: nil 无法正确触发自动检测 (issue #226)
+            // 正确做法是完全不传 language 参数
+            let options: DecodingOptions
+            if let lang = targetLang {
+                // 指定语言模式
+                Logger.keyboardInfo("Using specified language: \(lang)")
+                options = DecodingOptions(
+                    task: .transcribe,
+                    language: lang,
+                    temperature: 0.0,
+                    sampleLength: 224,
+                    usePrefillPrompt: true,
+                    usePrefillCache: true
+                )
+            } else {
+                // 自动检测模式 - 不传 language 参数以启用真正的自动检测
+                Logger.keyboardInfo("Using automatic language detection (no language specified)")
+                options = DecodingOptions(
+                    task: .transcribe,
+                    temperature: 0.0,
+                    sampleLength: 224,
+                    usePrefillPrompt: false,  // 自动检测时禁用 prefill，避免语言偏向
+                    usePrefillCache: false
+                )
+            }
             
             let results = try await kit.transcribe(audioPath: audioURL.path(), decodeOptions: options)
             
@@ -262,17 +280,6 @@ final class WhisperService {
 
     func unload() {
         whisperKit = nil
-    }
-    
-    /// 获取系统语言代码
-    /// 返回 nil 表示使用 Whisper 自动检测语言（支持中英文混合识别）
-    /// 如需强制指定语言，可在 AppSettings 中添加语言设置选项
-    private func getSystemLanguageCode() -> String? {
-        // 返回 nil 让 Whisper 自动检测语言
-        // Whisper 的 tiny 模型支持 99 种语言的自动检测
-        // 这样可以实现中英文混合输入的自动识别
-        Logger.keyboardInfo("Using auto language detection for multilingual support")
-        return nil
     }
 }
 

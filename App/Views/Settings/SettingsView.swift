@@ -14,6 +14,9 @@ struct SettingsView: View {
                     NavigationLink("Background Duration") {
                         Text("Background Duration Settings")
                     }
+                    NavigationLink("Speech Recognition Language") {
+                        SpeechRecognitionLanguageView()
+                    }
                 }
 
                 Section("Translation") {

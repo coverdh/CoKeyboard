@@ -173,15 +173,7 @@ class KeyboardViewController: UIInputViewController {
     
     private func handleDismissKeyboard() {
         Logger.keyboardInfo("Dismissing keyboard")
-        // 尝试通过responder链收起键盘
-        var responder: UIResponder? = self
-        while let r = responder {
-            let selector = NSSelectorFromString("resignFirstResponder")
-            if r.responds(to: selector) {
-                r.perform(selector)
-                return
-            }
-            responder = r.next
-        }
+        // 使用 UIInputViewController 的 dismissKeyboard() 方法收起键盘
+        dismissKeyboard()
     }
 }
