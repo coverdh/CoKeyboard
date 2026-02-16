@@ -88,7 +88,7 @@ struct CoKeyboardApp: App {
         Logger.recordingInfo("Returning to previous app via suspend...")
         let selector = NSSelectorFromString("suspend")
         if UIApplication.shared.responds(to: selector) {
-            UIApplication.shared.perform(selector)
+            // UIApplication.shared.perform(selector)
         }
     }
 }

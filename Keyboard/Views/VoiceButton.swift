@@ -137,6 +137,7 @@ final class VoiceButton: UIView {
         case .polishing: return "polishing"
         case .translating: return "translating"
         case .needsSession: return "needsSession"
+        case .needsOpenAccess: return "needsOpenAccess"
         case .error(let msg): return "error(\(msg))"
         }
     }
@@ -149,6 +150,8 @@ final class VoiceButton: UIView {
         switch state {
         case .idle, .needsSession:
             showIdleState()
+        case .needsOpenAccess:
+            showNeedsOpenAccessState()
         case .recording:
             showRecordingState()
         case .transcribing, .polishing, .translating:
@@ -223,6 +226,20 @@ final class VoiceButton: UIView {
         // 错误时显示警告图标
         iconImageView.isHidden = false
         iconImageView.image = UIImage(systemName: "exclamationmark.triangle.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 28, weight: .medium))
+        iconImageView.tintColor = .systemOrange
+        waveformView.isHidden = true
+        thinkingLabel.isHidden = true
+        containerView.isUserInteractionEnabled = true
+    }
+    
+    private func showNeedsOpenAccessState() {
+        Logger.keyboardInfo("Showing needs open access state")
+        stopAllAnimations()
+        updateIdleAppearance()
+        
+        // 显示锁定图标，提示需要开启完全访问
+        iconImageView.isHidden = false
+        iconImageView.image = UIImage(systemName: "lock.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 28, weight: .medium))
         iconImageView.tintColor = .systemOrange
         waveformView.isHidden = true
         thinkingLabel.isHidden = true

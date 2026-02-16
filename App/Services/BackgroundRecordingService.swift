@@ -12,6 +12,7 @@ final class BackgroundRecordingService: ObservableObject {
     private var audioFile: AVAudioFile?
     private var pollTimer: Timer?
     private var idleTimer: Timer?           // 空闲计时器，用于自动停止系统录音
+    private var heartbeatTimer: Timer?      // 心跳计时器，每200ms更新时间戳
     private let sessionManager = RecordingSessionManager.shared
     
     /// 是否需要在处理完成后返回上一个 App
@@ -35,6 +36,33 @@ final class BackgroundRecordingService: ObservableObject {
     private init() {
         Logger.recordingInfo("BackgroundRecordingService initialized")
         setupAudioSessionNotifications()
+        
+        // 主 APP 启动时清理残留状态
+        // 如果上次 APP 被系统杀掉，共享状态可能残留
+        cleanupStaleState()
+    }
+    
+    /// 清理残留的共享状态
+    private func cleanupStaleState() {
+        let sessionManager = RecordingSessionManager.shared
+        
+        // 如果当前没有在录音，清理时间戳和状态
+        if !isRecording {
+            // 清除时间戳
+            sessionManager.lastActiveTime = nil
+            sessionManager.currentAudioLevel = 0.0
+            
+            // 如果处理状态卡在中间状态，重置为 idle
+            let status = sessionManager.processingStatus
+            if status == .transcribing || status == .polishing || status == .recording {
+                Logger.recordingInfo("Cleaning stale processingStatus: \(status.rawValue)")
+                sessionManager.processingStatus = .idle
+            }
+        }
+        
+        // 发送状态变化通知，让键盘同步
+        DarwinNotify.post(DarwinNotify.recordingStateChanged)
+        Logger.recordingInfo("Stale state cleanup completed")
     }
     
     // MARK: - Audio Session Notifications
@@ -206,6 +234,9 @@ final class BackgroundRecordingService: ObservableObject {
         self.audioEngine = engine
         self.isRecording = true
         
+        // 启动心跳计时器，每 200ms 更新时间戳
+        startHeartbeat()
+        
         // 发送 Darwin Notify 通知键盘扩展
         DarwinNotify.post(DarwinNotify.recordingStateChanged)
         
@@ -216,6 +247,27 @@ final class BackgroundRecordingService: ObservableObject {
         startCapturing()
         
         Logger.recordingInfo("Recording started successfully!")
+    }
+    
+    // MARK: - Heartbeat (心跳时间戳)
+    
+    /// 启动心跳计时器，每 200ms 更新时间戳
+    private func startHeartbeat() {
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            self?.sessionManager.updateActiveTime()
+        }
+        // 立即更新一次
+        sessionManager.updateActiveTime()
+        Logger.recordingInfo("Heartbeat timer started (interval: 200ms)")
+    }
+    
+    /// 停止心跳计时器
+    private func stopHeartbeat() {
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
+        sessionManager.lastActiveTime = nil
+        Logger.recordingInfo("Heartbeat timer stopped")
     }
     
     /// 开始采集（写入文件）
@@ -335,9 +387,9 @@ final class BackgroundRecordingService: ObservableObject {
         // 清零音频电平
         sessionManager.currentAudioLevel = 0.0
         
-        // 更新共享状态 - 停止采集但保持系统录音
+        // 更新共享状态 - 停止采集但保持系统录音（时间戳继续更新）
         sessionManager.stopCapturing()
-        Logger.recordingInfo("Shared state updated, isCapturing = false, isRecording = true")
+        Logger.recordingInfo("Capture stopped, heartbeat continues")
     }
     
     /// 完全停止录音（AVAudioEngine + 清理状态）
@@ -351,6 +403,10 @@ final class BackgroundRecordingService: ObservableObject {
         idleTimer = nil
         durationTimer?.invalidate()
         durationTimer = nil
+        
+        // 停止心跳
+        stopHeartbeat()
+        
         Logger.recordingInfo("All timers stopped")
         
         // 停止写入文件
@@ -383,7 +439,7 @@ final class BackgroundRecordingService: ObservableObject {
         // 发送 Darwin Notify 通知键盘扩展
         DarwinNotify.post(DarwinNotify.recordingStateChanged)
         
-        Logger.recordingInfo("Shared state updated, isRecording = false")
+        Logger.recordingInfo("Recording stopped, heartbeat cleared")
     }
     
     // MARK: - Audio Format Conversion

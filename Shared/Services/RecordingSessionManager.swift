@@ -10,8 +10,7 @@ final class RecordingSessionManager {
     }
     
     // Keys
-    private let isRecordingKey = "isRecordingActive"
-    private let isCapturingKey = "isCapturingAudio"      // 是否正在采集音频（与系统录音状态区分）
+    private let lastActiveTimeKey = "lastActiveTime"       // 主 APP 活跃时间戳（每200ms更新）
     private let shouldStopKey = "shouldStopRecording"
     private let recordingStartTimeKey = "recordingStartTime"
     private let audioFilePathKey = "recordingAudioFilePath"
@@ -19,55 +18,46 @@ final class RecordingSessionManager {
     private let processingStatusKey = "processingStatus" // idle, transcribing, polishing, done, error
     private let audioLevelKey = "currentAudioLevel"      // 实时音频电平 0.0-1.0
     private let processingProgressKey = "processingProgress" // 处理进度 0.0-1.0
-    private let lastCaptureEndTimeKey = "lastCaptureEndTime" // 上次采集结束时间
 
     private init() {}
 
-    // MARK: - Recording State (跨进程共享)
+    // MARK: - Recording State (基于时间戳的状态检测)
 
-    /// 主App是否正在录音（系统录音状态）
-    var isRecording: Bool {
-        get { defaults?.bool(forKey: isRecordingKey) ?? false }
-        set {
-            defaults?.set(newValue, forKey: isRecordingKey)
+    /// 主 APP 最后活跃时间（每 200ms 更新一次）
+    var lastActiveTime: Date? {
+        get {
             defaults?.synchronize()
+            return defaults?.object(forKey: lastActiveTimeKey) as? Date
         }
-    }
-    
-    /// 是否正在采集音频（用户点击录制后的实际采集状态）
-    /// 与 isRecording 区分：isRecording 表示系统录音保持，isCapturing 表示实际在采集音频
-    var isCapturing: Bool {
-        get { defaults?.bool(forKey: isCapturingKey) ?? false }
-        set {
-            defaults?.set(newValue, forKey: isCapturingKey)
-            defaults?.synchronize()
-        }
-    }
-    
-    /// 上次采集结束时间
-    var lastCaptureEndTime: Date? {
-        get { defaults?.object(forKey: lastCaptureEndTimeKey) as? Date }
         set {
             if let value = newValue {
-                defaults?.set(value, forKey: lastCaptureEndTimeKey)
+                defaults?.set(value, forKey: lastActiveTimeKey)
             } else {
-                defaults?.removeObject(forKey: lastCaptureEndTimeKey)
+                defaults?.removeObject(forKey: lastActiveTimeKey)
             }
-            defaults?.synchronize()
+            // 不调用 synchronize，高频更新时依赖自动同步
         }
     }
     
-    /// 检查系统录音是否仍在保持时间内
-    /// - Parameter maxIdleSeconds: 最大空闲时间（秒）
-    /// - Returns: 如果系统录音仍在保持时间内返回 true
-    func isRecordingStillActive(maxIdleSeconds: Int) -> Bool {
-        guard isRecording else { return false }
-        guard let lastEndTime = lastCaptureEndTime else {
-            // 如果没有采集结束时间，说明正在采集中
-            return isCapturing
-        }
-        let idleDuration = Date().timeIntervalSince(lastEndTime)
-        return idleDuration < Double(maxIdleSeconds)
+    /// 更新活跃时间戳（主 APP 每 200ms 调用）
+    func updateActiveTime() {
+        lastActiveTime = Date()
+    }
+    
+    /// 检查主 APP 是否活跃（时间戳在 1 秒内）
+    var isMainAppActive: Bool {
+        guard let lastActive = lastActiveTime else { return false }
+        return Date().timeIntervalSince(lastActive) < 1.0
+    }
+    
+    /// 检查是否正在录音（processingStatus 为 recording 且主 APP 活跃）
+    var isRecording: Bool {
+        return processingStatus == .recording && isMainAppActive
+    }
+    
+    /// 检查是否正在采集音频（有音频电平更新且主 APP 活跃）
+    var isCapturing: Bool {
+        return isMainAppActive && currentAudioLevel > 0
     }
 
     /// 键盘请求停止录音的信号
@@ -196,26 +186,25 @@ final class RecordingSessionManager {
     /// 主App调用：开始录音（系统录音+音频采集）
     func startRecording() {
         shouldStopRecording = false
-        isRecording = true
-        isCapturing = true
         recordingStartTime = Date()
-        lastCaptureEndTime = nil
         processingStatus = .recording
         pendingResult = nil
+        updateActiveTime()  // 立即更新时间戳
     }
     
-    /// 主App调用：停止音频采集（但保持系统录音）
+    /// 主App调用：停止音频采集（但保持系统录音待机）
     func stopCapturing() {
-        isCapturing = false
-        lastCaptureEndTime = Date()
+        currentAudioLevel = 0.0
+        // processingStatus 保持 .recording，表示系统录音仍在运行
+        // 时间戳继续更新，表示主 APP 仍然活跃
     }
 
     /// 主App调用：完全停止录音（系统录音+清理状态）
     func stopRecording() {
-        isRecording = false
-        isCapturing = false
         shouldStopRecording = false
-        lastCaptureEndTime = nil
+        currentAudioLevel = 0.0
+        processingStatus = .idle
+        lastActiveTime = nil  // 清除时间戳，表示不再活跃
     }
 
     /// 键盘调用：请求停止录音
@@ -225,16 +214,14 @@ final class RecordingSessionManager {
 
     /// 重置所有状态
     func reset() {
-        isRecording = false
-        isCapturing = false
         shouldStopRecording = false
         recordingStartTime = nil
-        lastCaptureEndTime = nil
         audioFilePath = nil
         processingStatus = .idle
         pendingResult = nil
         currentAudioLevel = 0.0
         processingProgress = 0.0
+        lastActiveTime = nil
     }
 
     // MARK: - URL Scheme

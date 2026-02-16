@@ -88,6 +88,11 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - Bindings
 
     private func setupBindings() {
+        // 完全访问权限检查
+        voiceInputController.checkOpenAccess = { [weak self] in
+            return self?.hasFullAccess ?? false
+        }
+        
         // Voice button
         voiceButton.onTap = { [weak self] in
             Logger.keyboardInfo("Voice button tap received")
@@ -141,6 +146,12 @@ class KeyboardViewController: UIInputViewController {
                 Logger.keyboardError("No URL available for session activation")
             }
         }
+        
+        // 需要开启完全访问权限 - 显示提示
+        voiceInputController.onNeedsOpenAccess = { [weak self] in
+            Logger.keyboardInfo("Need to enable Open Access permission")
+            self?.showOpenAccessAlert()
+        }
 
         // Toolbar actions
         toolbarView.onDismissKeyboard = { [weak self] in
@@ -161,26 +172,57 @@ class KeyboardViewController: UIInputViewController {
         Logger.keyboardInfo("Bindings setup completed")
     }
 
+    // MARK: - Open Access Alert
+    
+    private func showOpenAccessAlert() {
+        // 在键盘扩展中不能显示 UIAlertController，通过打开设置引导用户
+        // 打开系统设置中的键盘设置页面
+        if let url = URL(string: UIApplication.openSettingsURLString) {
+            Logger.keyboardInfo("Opening settings for Open Access permission")
+            openURL(url)
+        }
+    }
+
     // MARK: - Open URL
 
     private func openURL(_ url: URL) {
         Logger.keyboardInfo("Attempting to open URL: \(url.absoluteString)")
+        
+        // 使用新的 open(_:options:completionHandler:) API
+        let openSelector = NSSelectorFromString("openURL:options:completionHandler:")
+        let sharedSelector = NSSelectorFromString("sharedApplication")
+        
+        // 方法1: 遍历响应者链查找 UIApplication
         var responder: UIResponder? = self
         while let r = responder {
-            if let application = r as? UIApplication {
-                Logger.keyboardInfo("Found UIApplication, opening URL")
-                application.open(url, options: [:], completionHandler: nil)
-                return
-            }
-            let selector = NSSelectorFromString("openURL:")
-            if r.responds(to: selector) {
-                Logger.keyboardInfo("Found responder with openURL:, performing selector")
-                r.perform(selector, with: url)
+            if let appClass = r.classForCoder as? NSObject.Type,
+               appClass.responds(to: sharedSelector),
+               let application = appClass.perform(sharedSelector)?.takeUnretainedValue() as? NSObject,
+               application.responds(to: openSelector) {
+                Logger.keyboardInfo("Found UIApplication via responder chain, opening URL")
+                callOpenMethod(on: application, selector: openSelector, url: url)
                 return
             }
             responder = r.next
         }
+        
+        // 方法2: 通过 keyPath 获取 UIApplication.shared
+        if let application = UIApplication.value(forKeyPath: "shared") as? NSObject,
+           application.responds(to: openSelector) {
+            Logger.keyboardInfo("Found UIApplication via keyPath, opening URL")
+            callOpenMethod(on: application, selector: openSelector, url: url)
+            return
+        }
+        
         Logger.keyboardError("Could not find responder to open URL")
+    }
+    
+    /// 使用 IMP 直接调用 openURL:options:completionHandler: 方法
+    private func callOpenMethod(on target: NSObject, selector: Selector, url: URL) {
+        let methodIMP = target.method(for: selector)
+        typealias OpenMethod = @convention(c) (NSObject, Selector, URL, [String: Any], ((Bool) -> Void)?) -> Void
+        let openFunc = unsafeBitCast(methodIMP, to: OpenMethod.self)
+        openFunc(target, selector, url, [:], nil)
     }
 
     // MARK: - Dismiss Keyboard
