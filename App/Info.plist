@@ -24,6 +24,8 @@
 	</array>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>CoKeyboard needs microphone access for voice input.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>CoKeyboard uses speech recognition to convert your voice into text. Your voice data is processed locally on the device.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
