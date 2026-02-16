@@ -11,11 +11,17 @@ struct SettingsView: View {
                 }
 
                 Section("Voice") {
+                    NavigationLink("Transcription Engine") {
+                        TranscriptionEngineSettingsView()
+                    }
                     NavigationLink("Background Duration") {
                         BackgroundDurationSettingsView()
                     }
                     NavigationLink("Speech Recognition Language") {
                         SpeechRecognitionLanguageView()
+                    }
+                    NavigationLink("Whisper Advanced Settings") {
+                        WhisperAdvancedSettingsView()
                     }
                 }
 

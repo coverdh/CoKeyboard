@@ -7,7 +7,6 @@ struct CoKeyboardApp: App {
     let modelContainer: ModelContainer
     @StateObject private var recordingService = BackgroundRecordingService.shared
     @State private var showingRecordingOverlay = false
-    @State private var sourceBundleID: String?
 
     init() {
         modelContainer = DataManager.shared.container
@@ -21,13 +20,19 @@ struct CoKeyboardApp: App {
                 // Recording overlay (仅在录音时显示，后台处理时不显示遮罩)
                 if showingRecordingOverlay && recordingService.isRecording {
                     RecordingOverlayView(
-                        sourceBundleID: sourceBundleID,
                         onDismiss: {
                             showingRecordingOverlay = false
                         }
                     )
                     .environmentObject(recordingService)
                     .transition(.opacity)
+                }
+            }
+            // 处理完成后自动隐藏遮罩
+            .onChange(of: recordingService.isRecording) { oldValue, newValue in
+                // 当录音停止且不在录音状态时，隐藏遮罩
+                if !newValue {
+                    showingRecordingOverlay = false
                 }
             }
             .animation(.easeInOut(duration: 0.3), value: showingRecordingOverlay)
@@ -42,14 +47,6 @@ struct CoKeyboardApp: App {
     private func handleURL(_ url: URL) {
         guard url.scheme == PermissionURLScheme.scheme else { return }
 
-        // Extract source bundle ID
-        if let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-           let queryItems = components.queryItems,
-           let source = queryItems.first(where: { $0.name == "source" })?.value {
-            sourceBundleID = source
-            RecordingSessionManager.shared.sourceAppBundleID = source
-        }
-
         switch url.host {
         case "start-recording", "activate-session", "request-mic-permission":
             startRecordingAndReturn()
@@ -59,15 +56,10 @@ struct CoKeyboardApp: App {
     }
 
     private func startRecordingAndReturn() {
-        showingRecordingOverlay = true
-        
         Task {
             // Request permission first
             let granted = await MicrophonePermission.request()
             guard granted else {
-                await MainActor.run {
-                    // Show permission denied - don't auto return
-                }
                 return
             }
 
@@ -75,44 +67,39 @@ struct CoKeyboardApp: App {
             do {
                 try recordingService.startRecording()
                 
-                // Small delay to ensure recording started
+                // 设置处理完成后返回上一个 App
+                recordingService.setShouldReturnToPreviousApp(true)
+                
+                // 小延迟确保录音启动，然后返回上一个 App
                 try? await Task.sleep(for: .milliseconds(300))
                 
-                // 尝试返回源 App
+                // 使用 suspend 返回上一个 App（用户从哪里来就回哪里）
                 await MainActor.run {
-                    returnToSourceApp()
+                    returnToPreviousApp()
                 }
             } catch {
-                print("Failed to start recording: \(error)")
+                Logger.recordingError("Failed to start recording: \(error)")
             }
         }
     }
     
-    /// 尝试返回源 App
-    private func returnToSourceApp() {
-        // 1. 先尝试使用已知的 bundleID
-        if let returnURL = RecordingSessionManager.shared.returnURL(for: sourceBundleID) {
-            Logger.recordingInfo("Returning to source app via URL: \(returnURL)")
-            UIApplication.shared.open(returnURL, options: [:], completionHandler: nil)
-            return
+    /// 返回上一个 App（利用系统的返回功能）
+    private func returnToPreviousApp() {
+        Logger.recordingInfo("Returning to previous app via suspend...")
+        let selector = NSSelectorFromString("suspend")
+        if UIApplication.shared.responds(to: selector) {
+            UIApplication.shared.perform(selector)
         }
-        
-        // 2. 如果没有 bundleID，显示提示让用户手动切换
-        Logger.recordingInfo("No source bundle ID, user needs to switch manually")
-        // 录音已开始，用户可以通过系统手势切换回原 App
-        // RecordingOverlayView 会显示相应提示
     }
 }
 
 // MARK: - Recording Overlay View
 
 struct RecordingOverlayView: View {
-    var sourceBundleID: String?
     var onDismiss: () -> Void
     
     @EnvironmentObject var recordingService: BackgroundRecordingService
     @State private var permissionDenied = false
-    @State private var showReturnHint = false
     
     private let sessionManager = RecordingSessionManager.shared
 
@@ -146,35 +133,11 @@ struct RecordingOverlayView: View {
                             .font(.headline)
                             .foregroundStyle(.white)
                         
-                        if sourceBundleID != nil {
-                            Text("点击下方按钮返回键盘")
-                                .font(.subheadline)
-                                .foregroundStyle(.white.opacity(0.7))
-                        } else {
-                            Text("请使用系统手势\n从屏幕底部上滑返回键盘")
-                                .font(.subheadline)
-                                .foregroundStyle(.white.opacity(0.7))
-                                .multilineTextAlignment(.center)
-                        }
+                        Text("录音完成后将自动返回")
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.7))
                     }
                     .padding(.top, 8)
-                    
-                    // 返回按钮（如果有源 App）
-                    if sourceBundleID != nil {
-                        Button(action: {
-                            if let returnURL = sessionManager.returnURL(for: sourceBundleID) {
-                                UIApplication.shared.open(returnURL, options: [:], completionHandler: nil)
-                            }
-                        }) {
-                            Label("返回键盘", systemImage: "arrow.uturn.backward")
-                                .font(.headline)
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 32)
-                                .padding(.vertical, 12)
-                                .background(Color.blue.opacity(0.8))
-                                .clipShape(Capsule())
-                        }
-                    }
                 }
                 
                 // Processing status
@@ -271,20 +234,9 @@ struct RecordingOverlayView: View {
     @ViewBuilder
     private var processingStatusView: some View {
         if sessionManager.processingStatus == .done {
-            Button(action: {
-                if let returnURL = sessionManager.returnURL(for: sourceBundleID) {
-                    UIApplication.shared.open(returnURL, options: [:], completionHandler: nil)
-                }
-                onDismiss()
-            }) {
-                Label("返回", systemImage: "arrow.uturn.backward")
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 32)
-                    .padding(.vertical, 12)
-                    .background(Color.green.opacity(0.8))
-                    .clipShape(Capsule())
-            }
+            Text("处理完成，正在返回...")
+                .font(.headline)
+                .foregroundStyle(.white)
         }
     }
 

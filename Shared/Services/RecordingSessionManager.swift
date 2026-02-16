@@ -5,7 +5,9 @@ import AVFoundation
 final class RecordingSessionManager {
     static let shared = RecordingSessionManager()
 
-    private let defaults: UserDefaults?
+    private var defaults: UserDefaults? {
+        UserDefaults(suiteName: AppConstants.appGroupID)
+    }
     
     // Keys
     private let isRecordingKey = "isRecordingActive"
@@ -13,16 +15,13 @@ final class RecordingSessionManager {
     private let shouldStopKey = "shouldStopRecording"
     private let recordingStartTimeKey = "recordingStartTime"
     private let audioFilePathKey = "recordingAudioFilePath"
-    private let sourceAppBundleIDKey = "sourceAppBundleID"
     private let pendingResultKey = "pendingVoiceResult"
     private let processingStatusKey = "processingStatus" // idle, transcribing, polishing, done, error
     private let audioLevelKey = "currentAudioLevel"      // 实时音频电平 0.0-1.0
     private let processingProgressKey = "processingProgress" // 处理进度 0.0-1.0
     private let lastCaptureEndTimeKey = "lastCaptureEndTime" // 上次采集结束时间
 
-    private init() {
-        defaults = UserDefaults(suiteName: AppConstants.appGroupID)
-    }
+    private init() {}
 
     // MARK: - Recording State (跨进程共享)
 
@@ -169,20 +168,6 @@ final class RecordingSessionManager {
         }
     }
 
-    // MARK: - Source App
-
-    var sourceAppBundleID: String? {
-        get { defaults?.string(forKey: sourceAppBundleIDKey) }
-        set {
-            if let value = newValue {
-                defaults?.set(value, forKey: sourceAppBundleIDKey)
-            } else {
-                defaults?.removeObject(forKey: sourceAppBundleIDKey)
-            }
-            defaults?.synchronize()
-        }
-    }
-
     // MARK: - Pending Result (转写结果传回键盘)
 
     var pendingResult: String? {
@@ -254,38 +239,11 @@ final class RecordingSessionManager {
 
     // MARK: - URL Scheme
 
-    /// 生成跳转主App的URL
+    /// 生成跳转主 App 的 URL
     func makeActivationURL(sourceBundleID: String?) -> URL? {
         var components = URLComponents()
         components.scheme = PermissionURLScheme.scheme
         components.host = "start-recording"
-
-        if let bundleID = sourceBundleID {
-            components.queryItems = [URLQueryItem(name: "source", value: bundleID)]
-        }
-
         return components.url
-    }
-
-    /// 根据bundle ID获取返回URL
-    func returnURL(for bundleID: String?) -> URL? {
-        guard let bundleID = bundleID else { return nil }
-
-        if let scheme = CommonAppSchemes.schemes[bundleID] {
-            return URL(string: scheme)
-        }
-
-        let possibleSchemes = [
-            bundleID.lowercased().replacingOccurrences(of: ".", with: ""),
-            bundleID.components(separatedBy: ".").last?.lowercased()
-        ].compactMap { $0 }
-
-        for scheme in possibleSchemes {
-            if let url = URL(string: "\(scheme)://") {
-                return url
-            }
-        }
-
-        return nil
     }
 }

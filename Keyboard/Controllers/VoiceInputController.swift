@@ -4,11 +4,11 @@ import AVFoundation
 
 enum KeyboardInputState {
     case idle
-    case recording        // 主App正在后台录音
+    case recording        // 主 App 正在采集音频
     case transcribing     // 正在转写
     case polishing        // 正在润色
     case translating      // 正在翻译
-    case needsSession     // 需要跳转主App开始录音
+    case needsSession     // 需要跳转主 App 开启录音
     case error(String)
 }
 
@@ -20,9 +20,12 @@ final class VoiceInputController {
     var onStateChanged: ((KeyboardInputState) -> Void)?
     var onTextReady: ((String) -> Void)?
     var onTokensUpdated: ((Int, Int) -> Void)?
-    var onNeedsSession: ((URL?) -> Void)?
-    var onAudioLevelUpdated: ((Float) -> Void)?     // 音频电平更新
-    var onProgressUpdated: ((Float) -> Void)?       // 处理进度更新
+    var onNeedsSession: ((URL?) -> Void)?          // 需要跳转主 App
+    var onAudioLevelUpdated: ((Float) -> Void)?    // 音频电平更新
+    var onProgressUpdated: ((Float) -> Void)?      // 处理进度更新
+    
+    /// 主 App 录音状态（通过 Darwin Notify 即时同步）
+    private var isMainAppRecording = false
 
     private(set) var currentState: KeyboardInputState = .idle {
         didSet { 
@@ -35,24 +38,45 @@ final class VoiceInputController {
     private var polishTokens = 0
     private var pollTimer: Timer?
 
-    private var capturingRequestTime: Date?  // 请求开始采集的时间
-    private let capturingTimeout: TimeInterval = 0.8  // 等待主 App 响应的超时时间（缩短以更快响应）
-
     init() {
         Logger.keyboardInfo("VoiceInputController initialized")
-        // 清理残留的处理状态，但保留录音状态
+        
+        // 监听 Darwin Notify，即时获取主 App 录音状态
+        setupDarwinNotifyObserver()
+        
+        // 初始化时同步一次状态
+        syncRecordingState()
+        
+        // 清理残留的处理状态
         cleanupStaleState()
+        
         // 检查是否有待处理的结果
         if sessionManager.processingStatus == .done {
             if let result = sessionManager.consumePendingResult(), !result.isEmpty {
                 Logger.processingInfo("Found pending result on init: \(result.prefix(50))...")
-                // 结果会在 onTextReady 设置后通知
             }
             sessionManager.processingStatus = .idle
         }
+        
         // 默认状态为等待录制
         currentState = .idle
         startPolling()
+    }
+    
+    // MARK: - Darwin Notify
+    
+    private func setupDarwinNotifyObserver() {
+        DarwinNotify.observe(DarwinNotify.recordingStateChanged) { [weak self] in
+            self?.syncRecordingState()
+        }
+        Logger.keyboardInfo("Darwin Notify observer setup complete")
+    }
+    
+    /// 同步主 App 录音状态
+    private func syncRecordingState() {
+        let wasRecording = isMainAppRecording
+        isMainAppRecording = sessionManager.isRecording
+        Logger.keyboardInfo("Recording state synced: \(wasRecording) -> \(isMainAppRecording)")
     }
     
     /// 清理残留的共享状态
@@ -69,6 +93,7 @@ final class VoiceInputController {
     
     deinit {
         pollTimer?.invalidate()
+        DarwinNotify.removeObserver(DarwinNotify.recordingStateChanged)
         Logger.keyboardInfo("VoiceInputController deinitialized")
     }
     
@@ -148,30 +173,13 @@ final class VoiceInputController {
             break
         }
         
-        // 检查是否正在采集音频（用户点击录制后的实际采集状态）
+        // 检查是否正在采集音频
         if isCapturing {
-            capturingRequestTime = nil  // 清除请求时间，主 App 已响应
             if case .recording = currentState {
                 // Already in recording state
             } else {
                 Logger.recordingInfo("Detected main app is capturing audio")
                 currentState = .recording
-            }
-            return
-        }
-        
-        // 检查是否正在等待主 App 开始采集
-        if case .recording = currentState, let requestTime = capturingRequestTime {
-            let elapsed = Date().timeIntervalSince(requestTime)
-            if elapsed > capturingTimeout {
-                // 超时：主 App 没有响应，可能已被杀死或 AVAudioSession 失效
-                Logger.recordingInfo("Capture request timed out after \(elapsed)s, main app may not be running")
-                capturingRequestTime = nil
-                // 重置共享状态，强制跳转主 App
-                sessionManager.stopRecording()
-                currentState = .idle
-                // 自动触发跳转主 App
-                triggerSessionActivation()
             }
             return
         }
@@ -185,7 +193,6 @@ final class VoiceInputController {
                 Logger.keyboardInfo("Resetting from polishing to idle")
                 currentState = .idle
             } else if case .recording = currentState {
-                // 如果之前在录制但现在不在采集了，重置为 idle
                 Logger.keyboardInfo("Resetting from recording to idle (capture stopped)")
                 currentState = .idle
             }
@@ -209,22 +216,17 @@ final class VoiceInputController {
 
     func toggleRecording() {
         Logger.keyboardInfo("toggleRecording called, current state: \(stateDescription(currentState))")
-        Logger.keyboardInfo("isRecording: \(sessionManager.isRecording), isCapturing: \(sessionManager.isCapturing), shouldStop: \(sessionManager.shouldStopRecording)")
+        Logger.keyboardInfo("isMainAppRecording: \(isMainAppRecording), isCapturing: \(sessionManager.isCapturing)")
         
         switch currentState {
-        case .idle, .needsSession, .error:
-            // Check if main app has active recording session (within idle timeout)
-            let settings = AppSettings.shared
-            let isSessionActive = sessionManager.isRecordingStillActive(maxIdleSeconds: settings.voiceBackgroundDuration)
-            
-            if isSessionActive {
-                // 系统录音仍在保持时间内，可以直接开始采集
-                Logger.recordingInfo("Recording session is still active, starting capture directly")
-                // 通知主 App 重新开始采集
+        case .idle, .error:
+            // 简化判断：如果主 App 正在录音，直接开始采集；否则跳转主 App
+            if isMainAppRecording {
+                Logger.recordingInfo("Main app is recording, starting capture directly")
+                currentState = .recording
                 requestStartCapturing()
             } else {
-                // 需要跳转主 App 启动系统录音
-                Logger.recordingInfo("Need to start recording via main app")
+                Logger.recordingInfo("Main app not recording, need to open main app")
                 triggerSessionActivation()
             }
         case .recording:
@@ -236,16 +238,11 @@ final class VoiceInputController {
         }
     }
     
-    /// 请求主 App 开始采集（系统录音已处于活跃状态）
+    /// 请求主 App 开始采集
     private func requestStartCapturing() {
         Logger.recordingInfo("Requesting start capturing")
         // 重置停止信号，让主 App 知道可以开始采集了
         sessionManager.shouldStopRecording = false
-        // 记录请求时间，用于超时检测
-        capturingRequestTime = Date()
-        // 更新状态为录音中，等待主 App 开始采集
-        // 如果主 App 在超时时间内没有响应，会自动跳转主 App
-        currentState = .recording
     }
     
     private func requestStopRecording() {
@@ -256,7 +253,7 @@ final class VoiceInputController {
 
     private func triggerSessionActivation() {
         Logger.keyboardInfo("Triggering session activation - will jump to main app")
-        currentState = .needsSession
+        // 直接跳转，不需要传递 bundleID，主 App 会使用系统返回功能
         let url = sessionManager.makeActivationURL(sourceBundleID: nil)
         Logger.keyboardInfo("Activation URL: \(url?.absoluteString ?? "nil")")
         onNeedsSession?(url)

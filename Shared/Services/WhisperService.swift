@@ -1,5 +1,6 @@
 import Foundation
 import WhisperKit
+import CoreML
 
 final class WhisperService {
     static let shared = WhisperService()
@@ -185,18 +186,18 @@ final class WhisperService {
             }
         }
         
-        // 始终使用 CPU 模式
-        // 原因：iOS 禁止后台 App 使用 GPU，而本 App 的主要使用场景是后台转写
-        // 使用 CPU 模式确保无论前台还是后台都能正常工作
-        Logger.keyboardInfo("Using CPU-only mode for Whisper (required for background processing)")
+        // 根据设置选择 CPU 或 GPU 模式
+        let useCPUOnly = AppSettings.shared.whisperUseCPUOnly
+        let computeUnit: MLComputeUnits = useCPUOnly ? .cpuOnly : .cpuAndGPU
+        Logger.keyboardInfo("Using \(useCPUOnly ? "CPU-only" : "CPU+GPU") mode for Whisper")
         
         let config = WhisperKitConfig(
             modelFolder: modelPath,
             computeOptions: ModelComputeOptions(
-                melCompute: .cpuOnly,
-                audioEncoderCompute: .cpuOnly,
-                textDecoderCompute: .cpuOnly,
-                prefillCompute: .cpuOnly
+                melCompute: computeUnit,
+                audioEncoderCompute: computeUnit,
+                textDecoderCompute: computeUnit,
+                prefillCompute: computeUnit
             ),
             verbose: true,
             logLevel: .debug,
@@ -239,90 +240,21 @@ final class WhisperService {
 
         do {
             let settings = AppSettings.shared
+            let recognitionLanguage = language ?? settings.speechRecognitionLanguage
             
-            // 检查是否需要中英混合识别模式
-            let primaryLang = language ?? settings.speechRecognitionLanguage
-            let secondaryLang = settings.speechSecondaryLanguage
-            
-            // 判断是否为中英混合模式（主语言和辅助语言分别是中文和英文）
-            let isMixedMode = isChineseEnglishMixedMode(primary: primaryLang, secondary: secondaryLang)
-            
-            if isMixedMode {
-                // 中英混合模式：使用自动语言检测 + 双语提示词
-                Logger.keyboardInfo("Using Chinese-English mixed mode")
-                return try await performMixedLanguageTranscription(kit: kit, audioURL: audioURL)
-            } else if primaryLang == "auto" {
-                // 自动检测模式
+            if recognitionLanguage == "auto" {
+                // 自动检测模式：启用语言检测
                 Logger.keyboardInfo("Using automatic language detection")
-                return try await performTranscription(kit: kit, audioURL: audioURL, language: nil, prompt: nil)
+                return try await performTranscription(kit: kit, audioURL: audioURL, language: nil, detectLanguage: true)
             } else {
-                // 单语言模式
-                Logger.keyboardInfo("Using single language mode: \(primaryLang)")
-                return try await performTranscription(kit: kit, audioURL: audioURL, language: primaryLang, prompt: nil)
+                // 指定语言模式
+                Logger.keyboardInfo("Using specified language: \(recognitionLanguage)")
+                return try await performTranscription(kit: kit, audioURL: audioURL, language: recognitionLanguage, detectLanguage: false)
             }
         } catch {
             Logger.keyboardError("Transcription failed: \(error.localizedDescription)", error: error)
             throw WhisperServiceError.transcriptionFailed
         }
-    }
-    
-    /// 判断是否为中英混合模式
-    private func isChineseEnglishMixedMode(primary: String, secondary: String?) -> Bool {
-        let chineseLanguages = ["zh", "zh-CN", "zh-TW", "zh-HK", "chinese"]
-        let englishLanguages = ["en", "en-US", "en-GB", "english"]
-        
-        let isPrimaryChinese = chineseLanguages.contains { primary.lowercased().hasPrefix($0.lowercased()) }
-        let isPrimaryEnglish = englishLanguages.contains { primary.lowercased().hasPrefix($0.lowercased()) }
-        
-        guard let secondary = secondary else { return false }
-        let isSecondaryChinese = chineseLanguages.contains { secondary.lowercased().hasPrefix($0.lowercased()) }
-        let isSecondaryEnglish = englishLanguages.contains { secondary.lowercased().hasPrefix($0.lowercased()) }
-        
-        // 主语言中文+辅助语言英文 或 主语言英文+辅助语言中文
-        return (isPrimaryChinese && isSecondaryEnglish) || (isPrimaryEnglish && isSecondaryChinese)
-    }
-    
-    /// 执行中英混合语言转录
-    private func performMixedLanguageTranscription(kit: WhisperKit, audioURL: URL) async throws -> TranscriptionResult {
-        Logger.keyboardInfo("Performing mixed Chinese-English transcription with detectLanguage=true")
-        
-        // 中英混合模式的关键设置：
-        // 1. language = nil：不指定语言
-        // 2. detectLanguage = true：启用语言检测，让模型在每个segment自动识别语言
-        // 3. usePrefillPrompt = false：不使用预填充提示，避免强制单一语言
-        let options = DecodingOptions(
-            verbose: true,
-            task: .transcribe,
-            language: nil,  // 关键：不指定语言
-            temperature: 0.0,
-            temperatureIncrementOnFallback: 0.2,
-            temperatureFallbackCount: 5,
-            sampleLength: 224,
-            topK: 5,
-            usePrefillPrompt: false,  // 关键：禁用预填充，让模型自由检测
-            usePrefillCache: false,
-            detectLanguage: true,  // 关键：启用语言检测
-            skipSpecialTokens: true,
-            withoutTimestamps: true,
-            wordTimestamps: false,
-            clipTimestamps: [],
-            suppressBlank: true,
-            supressTokens: [],
-            compressionRatioThreshold: 2.4,
-            logProbThreshold: -1.0,
-            firstTokenLogProbThreshold: -1.5,
-            noSpeechThreshold: 0.6
-        )
-        
-        let results = try await kit.transcribe(audioPath: audioURL.path(), decodeOptions: options)
-        let text = results.map { $0.text }.joined(separator: " ").trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-        let tokenCount = text.count / 4
-        
-        // 清理结果中可能的标记
-        let cleanedText = cleanTranscriptionResult(text)
-        
-        Logger.keyboardInfo("Mixed transcription result: \(cleanedText.prefix(50))...")
-        return TranscriptionResult(text: cleanedText, tokenCount: tokenCount)
     }
     
     /// 清理转录结果中的标记
@@ -358,79 +290,61 @@ final class WhisperService {
         return cleaned
     }
     
-    /// 执行单次转录（指定语言模式）
-    private func performTranscription(kit: WhisperKit, audioURL: URL, language: String?, prompt: String?) async throws -> TranscriptionResult {
-        let options: DecodingOptions
+    /// 执行转录
+    private func performTranscription(kit: WhisperKit, audioURL: URL, language: String?, detectLanguage: Bool) async throws -> TranscriptionResult {
+        Logger.keyboardInfo("performTranscription starting - language: \(language ?? "auto"), detectLanguage: \(detectLanguage)")
         
-        if let lang = language {
-            Logger.keyboardInfo("Transcribing with specified language: \(lang)")
-            options = DecodingOptions(
-                verbose: true,
-                task: .transcribe,
-                language: lang,
-                temperature: 0.0,
-                temperatureIncrementOnFallback: 0.2,
-                temperatureFallbackCount: 3,
-                sampleLength: 224,
-                topK: 5,
-                usePrefillPrompt: true,
-                usePrefillCache: true,
-                detectLanguage: false,
-                skipSpecialTokens: true,
-                withoutTimestamps: true,
-                wordTimestamps: false,
-                clipTimestamps: [],
-                suppressBlank: true,
-                supressTokens: [],
-                compressionRatioThreshold: 2.4,
-                logProbThreshold: -1.0,
-                firstTokenLogProbThreshold: -1.5,
-                noSpeechThreshold: 0.6
-            )
-        } else {
-            // 自动语言检测模式
-            Logger.keyboardInfo("Transcribing with automatic language detection")
-            options = DecodingOptions(
-                verbose: true,
-                task: .transcribe,
-                language: nil,
-                temperature: 0.0,
-                temperatureIncrementOnFallback: 0.2,
-                temperatureFallbackCount: 5,
-                sampleLength: 224,
-                topK: 5,
-                usePrefillPrompt: false,
-                usePrefillCache: false,
-                detectLanguage: true,
-                skipSpecialTokens: true,
-                withoutTimestamps: true,
-                wordTimestamps: false,
-                clipTimestamps: [],
-                suppressBlank: true,
-                supressTokens: [],
-                compressionRatioThreshold: 2.4,
-                logProbThreshold: -1.0,
-                firstTokenLogProbThreshold: -1.5,
-                noSpeechThreshold: 0.6
-            )
+        // 根据设置构建 DecodingOptions
+        let settings = AppSettings.shared
+        let options = DecodingOptions(
+            verbose: true,
+            task: .transcribe,
+            language: language,
+            temperature: Float(settings.whisperTemperature),
+            temperatureIncrementOnFallback: 0.2,
+            temperatureFallbackCount: settings.whisperFallbackCount,
+            sampleLength: 224,
+            topK: 5,
+            usePrefillPrompt: language != nil,
+            usePrefillCache: language != nil,
+            detectLanguage: detectLanguage,
+            skipSpecialTokens: true,
+            withoutTimestamps: true,
+            wordTimestamps: false,
+            clipTimestamps: [],
+            suppressBlank: settings.whisperSuppressBlank,
+            supressTokens: [],
+            compressionRatioThreshold: settings.whisperUseCompressionRatioThreshold ? Float(settings.whisperCompressionRatioThreshold) : nil,
+            logProbThreshold: settings.whisperUseLogProbThreshold ? Float(settings.whisperLogProbThreshold) : nil,
+            firstTokenLogProbThreshold: settings.whisperUseLogProbThreshold ? Float(settings.whisperFirstTokenLogProbThreshold) : nil,
+            noSpeechThreshold: settings.whisperUseNoSpeechThreshold ? Float(settings.whisperNoSpeechThreshold) : 1.0
+        )
+        
+        Logger.keyboardInfo("Starting WhisperKit transcription...")
+        let results = try await kit.transcribe(audioPath: audioURL.path(), decodeOptions: options)
+        Logger.keyboardInfo("WhisperKit transcription completed, got \(results.count) result segments")
+        
+        // 详细输出每个结果段
+        for (index, result) in results.enumerated() {
+            Logger.keyboardInfo("Segment \(index): text=\"\(result.text)\"")
         }
         
-        let results = try await kit.transcribe(audioPath: audioURL.path(), decodeOptions: options)
         let text = results.map { $0.text }.joined(separator: " ").trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+        Logger.keyboardInfo("Raw transcription text: \"\(text)\"")
+        
         let tokenCount = text.count / 4
         
-        Logger.keyboardInfo("Transcription result: \(text.prefix(50))...")
-        return TranscriptionResult(text: text, tokenCount: tokenCount)
+        // 清理结果中可能的标记
+        let cleanedText = cleanTranscriptionResult(text)
+        Logger.keyboardInfo("Cleaned transcription text: \"\(cleanedText)\"")
+        
+        Logger.keyboardInfo("Transcription result: \(cleanedText.prefix(50))...")
+        return AppTranscriptionResult(text: cleanedText, tokenCount: tokenCount)
     }
 
     func unload() {
         whisperKit = nil
     }
-}
-
-struct TranscriptionResult {
-    let text: String
-    let tokenCount: Int
 }
 
 enum WhisperServiceError: LocalizedError {
